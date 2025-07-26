@@ -9,19 +9,21 @@
 
 # go-qga
 
-**go-qga** is a Go library to interact with the **QEMU Guest Agent** using the **QEMU Machine Protocol (QMP)**.
+**go-qga** is a high-performance Go library for interacting with the **QEMU Guest Agent** using the **QEMU Machine Protocol (QMP)**.
 
-It provides a strongly-typed, extensible API to communicate with virtual machines for automation, introspection, and management purposes.
+It provides both simple and advanced APIs with optimistic error handling, connection pooling, async execution, and comprehensive testing infrastructure for reliable VM automation and management.
 
 ---
 
 ## 🚀 Features
 
-- 📡 Communicates with QEMU Guest Agent over Unix sockets
-- 🔒 Auto-generated strongly-typed QMP commands 
-- 🔁 JSON (un)marshalling of requests and responses
-- 🧪 Built-in test server for command validation
-- 🛠️ Designed for extensibility and code generation
+- 🚀 **High Performance**: Optimistic error handling, connection pooling, and async execution
+- 📡 **Multiple APIs**: Simple client for basic use, executor for advanced scenarios
+- 🔒 **Type Safety**: Strongly-typed command interface with structured error handling
+- 🧪 **Testing Infrastructure**: Built-in test agents (Simple, Fast, Perfect) for development
+- 🔁 **Connection Management**: Unix socket transport with automatic reconnection
+- ⚡ **Worker Pools**: Concurrent command execution with configurable workers
+- 🛠️ **Extensible**: Clean interfaces for custom commands and transports
 
 ---
 
@@ -33,65 +35,148 @@ go get github.com/prevostcorentin/go-qga
 
 ## 🧰 Usage
 
-```golang
+### Simple Client API
+
+```go
 package main
 
 import (
     "fmt"
     "log"
-
     "github.com/prevostcorentin/go-qga/internal/qmp"
+)
+
+func main() {
+    // Simple one-liner connection
+    client := qmp.NewClient("/path/to/qga.sock")
+    if client.IsErr() {
+        log.Fatal(client.Error())
+    }
+    defer client.Value().Close()
+
+    // Get hostname with optimistic error handling
+    hostname := client.Value().GetHostname()
+    if hostname.IsErr() {
+        log.Fatal(hostname.Error())
+    }
+    
+    fmt.Println("VM hostname:", hostname.Value())
+}
+```
+
+### Advanced Executor API
+
+```go
+package main
+
+import (
+    "context"
+    "fmt"
+    "log"
+    "github.com/prevostcorentin/go-qga/internal/qmp"
+    "github.com/prevostcorentin/go-qga/internal/qmp/transport"
 )
 
 type HostnameCommand struct{}
 
-func (c *HostnameCommand) Execute() string {
-    return "guest-get-host-name"
-}
-
-func (c *HostnameCommand) Arguments() any {
-    return nil // No arguments for this command
-}
-
-func (c *HostnameCommand) Response() any {
-    return &HostnameResponse{}
-}
+func (c *HostnameCommand) Execute() string { return "guest-get-host-name" }
+func (c *HostnameCommand) Arguments() any { return nil }
+func (c *HostnameCommand) Response() any { return &HostnameResponse{} }
 
 type HostnameResponse struct {
-    Name string `json:"host-name"`
+    Name string `json:"name"`
 }
 
 func main() {
-    socket := qmp.NewSocket()
-    if err := socket.Connect("/path/to/qga.sock"); err != nil {
-        log.Fatal(err)
-    }
-    defer socket.Close()
-
-    executor := qmp.NewCommandExecutor(&socket)
-    command := &HostnameCommand{}
-
-    result, err := executor.Run(command)
+    // Advanced usage with executor
+    transport := transport.NewUnix("/path/to/qga.sock")
+    connection, err := qmp.NewConnection(transport)
     if err != nil {
         log.Fatal(err)
     }
+    defer connection.Close()
 
+    executor, err := qmp.NewExecutor(connection)
+    if err != nil {
+        log.Fatal(err)
+    }
+    defer executor.Close()
+
+    // Synchronous execution
+    result, err := executor.Run(context.Background(), &HostnameCommand{})
+    if err != nil {
+        log.Fatal(err)
+    }
+    
     response := result.(*HostnameResponse)
     fmt.Println("VM hostname:", response.Name)
+
+    // Asynchronous execution
+    resultCh := executor.RunAsync(context.Background(), &HostnameCommand{})
+    select {
+    case execResult := <-resultCh:
+        if execResult.Err != nil {
+            log.Fatal(execResult.Err)
+        }
+        response := execResult.Data.(*HostnameResponse)
+        fmt.Println("Async hostname:", response.Name)
+    }
 }
 ```
 
 ## 🧪 Testing
 
-Fake QMP agents are used to write fast and reliable tests without needing a real VM.
+The library includes comprehensive testing infrastructure with fake QMP agents:
+
+```go
+package main
+
+import (
+    "github.com/prevostcorentin/go-qga/internal/testing"
+    "github.com/prevostcorentin/go-qga/internal/qmp"
+)
+
+func main() {
+    // Start a test agent
+    agent := testing.Perfect("/tmp/test-qga.sock")
+    result := agent.Start()
+    if result.IsErr() {
+        panic(result.Error())
+    }
+    defer agent.Stop()
+
+    // Connect and test
+    client := qmp.NewClient(agent.Path())
+    hostname := client.Value().GetHostname()
+    // hostname.Value() == "perfect-vm"
+}
+```
+
+**Available Test Agents:**
+- `testing.Simple()` - Basic functionality
+- `testing.Fast()` - High-performance testing  
+- `testing.Perfect()` - Full-featured with benchmarking
+
+All agents support fluent configuration:
+```go
+agent := testing.Perfect("/tmp/qga.sock").
+    WithConnections(10000).
+    WithTimeout(30*time.Second).
+    WithBuffer(8192)
+```
 
 ## 🔮 Roadmap
 
 - [x] QMP socket communication
-- [x] Generic command execution
+- [x] Generic command execution  
+- [x] Async execution with worker pools
+- [x] Comprehensive error handling system
+- [x] Connection pooling and management
+- [x] Testing infrastructure with fake agents
 - [ ] JSON struct code generation from QMP schema
 - [ ] Command retry/replay support
-- [ ] Better error wrapping and transport management
+- [ ] HTTP/TCP transport support
+- [ ] Metrics and observability
 
 ## 🤝 Contributing
 
