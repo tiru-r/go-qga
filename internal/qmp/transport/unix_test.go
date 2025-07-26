@@ -16,7 +16,9 @@ package transport_test
 
 import (
 	"bufio"
+	"context"
 	"net"
+	"sync"
 	"testing"
 
 	. "github.com/prevostcorentin/go-qga/internal/errors"
@@ -26,12 +28,16 @@ import (
 
 func TestUnexistingSocketFailure(t *testing.T) {
 	unexistingSocketPath := "/this/socket/does/not/exist/for/sure"
-	unixTransport := transport.NewTransport("unix", unexistingSocketPath)
+	unixTransport, err := transport.NewTransport("unix", unexistingSocketPath)
+	if err != nil {
+		t.Fatalf("creating transport: %v", err)
+	}
 	if unixTransport.Path() != unexistingSocketPath {
 		t.Fatalf(`wrong transport path "%v". expected "%s"`, unixTransport.Path(), unexistingSocketPath)
 	}
 	var transportError *TransportError
-	if transportError = unixTransport.Connect(); transportError == nil {
+	ctx := context.Background()
+	if transportError = unixTransport.Connect(ctx); transportError == nil {
 		t.Fatal("there should have been an error here")
 	}
 	if transportError.Domain() != TransportDomain {
@@ -45,6 +51,7 @@ func TestUnexistingSocketFailure(t *testing.T) {
 type echoAgent struct {
 	listener net.Listener
 	done     chan struct{}
+	wg       sync.WaitGroup
 	t        *testing.T
 	path     string
 }
@@ -74,18 +81,23 @@ func (agent *echoAgent) Start() {
 					agent.t.Fatalf("can't accept connection: %v", acceptError)
 				}
 			}
+			agent.wg.Add(1)
 			go func() {
+				defer agent.wg.Done()
 				defer connection.Close()
 				connectionReader, connectionWriter := bufio.NewReader(connection), bufio.NewWriter(connection)
 				bytes, connectionError := connectionReader.ReadBytes('\n')
 				if connectionError != nil {
-					agent.t.Fatalf("can't read: %v", connectionError)
+					agent.t.Logf("can't read (may be normal): %v", connectionError)
+					return
 				}
 				if _, writeError := connectionWriter.Write(bytes); writeError != nil {
-					agent.t.Fatalf("can't write: %v", writeError)
+					agent.t.Logf("can't write (may be normal): %v", writeError)
+					return
 				}
 				if flushError := connectionWriter.Flush(); flushError != nil {
-					agent.t.Fatalf("can't flush: %v", flushError)
+					agent.t.Logf("can't flush (may be normal): %v", flushError)
+					return
 				}
 			}()
 		}
@@ -97,33 +109,39 @@ func (agent *echoAgent) Stop() {
 	if err := agent.listener.Close(); err != nil {
 		agent.t.Fatalf("can't close listener: %v", err)
 	}
+	agent.wg.Wait()
 }
 
 func TestReadWrite(t *testing.T) {
+	ctx := context.Background()
 	agent := newEchoAgent(t)
 	agent.Start()
-	unixTransport := transport.NewTransport("unix", agent.Path())
-	if err := unixTransport.Connect(); err != nil {
+	defer agent.Stop()
+	unixTransport, err := transport.NewTransport("unix", agent.Path())
+	if err != nil {
+		t.Fatalf("creating transport: %v", err)
+	}
+	if err := unixTransport.Connect(ctx); err != nil {
 		t.Fatalf("while connecting socket: %v", err)
 	}
 	expectedResponse := []byte("some string\n")
-	if writeError := unixTransport.Write(expectedResponse); writeError != nil {
+	if writeError := unixTransport.Write(ctx, expectedResponse); writeError != nil {
 		t.Fatalf("while writing: %v", writeError)
 	}
-	response, readError := unixTransport.Read()
+	response, readError := unixTransport.Read(ctx)
 	if readError != nil {
 		t.Fatalf("while reading: %v", readError)
 	}
 	if string(response) != string(expectedResponse) {
 		t.Errorf(`wrong response "%v". expected "%s"`, string(response), string(expectedResponse))
 	}
-	agent.Stop()
 }
 
 type closeConnectionAgent struct {
 	listener net.Listener
 	t        *testing.T
 	done     chan struct{}
+	wg       sync.WaitGroup
 	path     string
 }
 
@@ -152,8 +170,13 @@ func (agent *closeConnectionAgent) Start() {
 					agent.t.Fatalf("can't accept connection: %v", acceptError)
 				}
 			}
-			connection.Read([]byte{})
-			connection.Close()
+			agent.wg.Add(1)
+			go func() {
+				defer agent.wg.Done()
+				defer connection.Close()
+				// Immediately close the connection without sending data
+				// This will cause the read to fail
+			}()
 		}
 	}()
 }
@@ -163,18 +186,24 @@ func (agent *closeConnectionAgent) Stop() {
 	if err := agent.listener.Close(); err != nil {
 		agent.t.Fatalf("can't close listener: %v", err)
 	}
+	agent.wg.Wait()
 }
 
 func TestNoWrite(t *testing.T) {
+	ctx := context.Background()
 	agent := newCloseConnectionAgent(t)
 	agent.Start()
-	transport := transport.NewTransport("unix", agent.Path())
-	if connectError := transport.Connect(); connectError != nil {
+	defer agent.Stop()
+	transport, err := transport.NewTransport("unix", agent.Path())
+	if err != nil {
+		t.Fatalf("creating transport: %v", err)
+	}
+	if connectError := transport.Connect(ctx); connectError != nil {
 		t.Fatalf("while connecting: %v", connectError)
 	}
 	largePayload := make([]byte, 1<<20) // 1 MiB of zeros
 	var writeError error
-	if writeError = transport.Write(largePayload); writeError == nil {
+	if writeError = transport.Write(ctx, largePayload); writeError == nil {
 		t.Fatal("there should have been an error here")
 	}
 	transportError := writeError.(*TransportError)
@@ -187,14 +216,22 @@ func TestNoWrite(t *testing.T) {
 }
 
 func TestNoRead(t *testing.T) {
+	ctx := context.Background()
 	agent := newCloseConnectionAgent(t)
 	agent.Start()
-	transport := transport.NewTransport("unix", agent.Path())
-	if connectError := transport.Connect(); connectError != nil {
+	defer agent.Stop()
+
+	transport, err := transport.NewTransport("unix", agent.Path())
+	if err != nil {
+		t.Fatalf("creating transport: %v", err)
+	}
+	if connectError := transport.Connect(ctx); connectError != nil {
 		t.Fatalf("while connecting: %v", connectError)
 	}
+	defer transport.Close()
+
 	var readError error
-	if _, readError = transport.Read(); readError == nil {
+	if _, readError = transport.Read(ctx); readError == nil {
 		t.Fatal("there should have been an error here")
 	}
 	transportError := readError.(*TransportError)

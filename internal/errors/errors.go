@@ -14,7 +14,6 @@
 
 package errors
 
-import "fmt"
 
 type QgaError interface {
 	error
@@ -27,12 +26,14 @@ type DomainType string
 
 const (
 	TransportDomain     DomainType = "Transport"
-	QmpConnectionDomain            = "Connection"
+	ConnectionDomain               = "Connection"
 	ProtocolDomain                 = "Protocol"
 	CodecDomain                    = "Codec"
 )
 
 func formatErrorMessage(err QgaError) string {
-	message := fmt.Sprintf("Error: %s => %v", err.Domain(), err.Unwrap())
-	return message
+	if underlying := err.Unwrap(); underlying != nil {
+		return "Error: " + string(err.Domain()) + " => " + underlying.Error()
+	}
+	return "Error: " + string(err.Domain()) + " => <nil>"
 }

@@ -15,65 +15,193 @@
 package qmp
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"sync"
+	"sync/atomic"
 
-	. "github.com/prevostcorentin/go-qga/internal/errors"
+	"github.com/prevostcorentin/go-qga/internal/common"
+	qgaerrors "github.com/prevostcorentin/go-qga/internal/errors"
 	"github.com/prevostcorentin/go-qga/internal/qmp/transport"
 )
 
-type QmpConnection interface {
-	Connect(path string) *QmpConnectionError
-	Send(bytes []byte) ([]byte, *QmpConnectionError)
+type Connection interface {
+	Connect(ctx context.Context, path string) *qgaerrors.ConnectionError
+	Send(ctx context.Context, bytes []byte) ([]byte, *qgaerrors.ConnectionError)
+	SendAsync(ctx context.Context, bytes []byte) <-chan AsyncResult
 	Close() error
 }
 
-type connection struct {
-	transport transport.Transport
+type AsyncResult struct {
+	Data []byte
+	Err  *qgaerrors.ConnectionError
 }
 
-func Open(path string, transport transport.Transport) (QmpConnection, *QmpConnectionError) {
+type asyncRequest struct {
+	id   uint64
+	ch   chan AsyncResult
+	data []byte
+}
+
+type qmpConnection struct {
+	*common.BaseState
+	transport      transport.Transport
+	requestCounter uint64
+	pendingReqs    map[uint64]chan AsyncResult
+	pool           *sync.Pool
+}
+
+func Open(ctx context.Context, path string, transport transport.Transport) (Connection, *qgaerrors.ConnectionError) {
+	if transport == nil {
+		return nil, qgaerrors.ErrConnectionNil
+	}
+
 	if _, err := os.Stat(path); errors.Is(err, os.ErrNotExist) {
 		errorReason := fmt.Errorf(`socket "%s" does not exist`, path)
-		return nil, NewQmpConnectionError(errorReason, ConnectErrorKind)
+		return nil, qgaerrors.NewConnectionError(errorReason, qgaerrors.ConnectErrorKind)
 	}
-	if err := transport.Connect(); err != nil {
-		return nil, NewQmpConnectionError(err, ConnectErrorKind)
+
+	if err := transport.Connect(ctx); err != nil {
+		if underlying := err.Unwrap(); underlying != nil {
+			return nil, qgaerrors.NewConnectionError(underlying, qgaerrors.ConnectErrorKind)
+		}
+		return nil, qgaerrors.NewConnectionError(err, qgaerrors.ConnectErrorKind)
 	}
-	socket := connection{transport: transport}
-	if err := socket.Connect(path); err != nil {
-		return nil, NewQmpConnectionError(err, ConnectErrorKind)
+
+	conn := &qmpConnection{
+		BaseState:   common.NewBaseState(),
+		transport:   transport,
+		pendingReqs: make(map[uint64]chan AsyncResult),
+		pool: &sync.Pool{
+			New: func() any {
+				return make(chan AsyncResult, 1)
+			},
+		},
 	}
-	return &socket, nil
+
+	if err := conn.Connect(ctx, path); err != nil {
+		return nil, err
+	}
+	return conn, nil
 }
 
-func (connection *connection) Connect(path string) *QmpConnectionError {
-	return connection.consumeBanner()
+func (c *qmpConnection) Connect(ctx context.Context, path string) *qgaerrors.ConnectionError {
+	return c.consumeBanner(ctx)
 }
 
-func (connection *connection) consumeBanner() *QmpConnectionError {
-	// TODO: Use the banner to gather agent capabilities (could result in client code generation ?)
-	if _, err := connection.transport.Read(); err != nil {
-		return NewQmpConnectionError(err, ReadErrorKind)
+func (c *qmpConnection) consumeBanner(ctx context.Context) *qgaerrors.ConnectionError {
+	// Read and consume the QMP banner (currently discarded)
+	if _, err := c.transport.Read(ctx); err != nil {
+		return qgaerrors.NewConnectionError(err, qgaerrors.ReadErrorKind)
 	}
 	return nil
 }
 
-func (connection *connection) Send(bytes []byte) ([]byte, *QmpConnectionError) {
-	if err := connection.transport.Write(bytes); err != nil {
-		return nil, NewQmpConnectionError(err, SendErrorKind)
+func (c *qmpConnection) Send(ctx context.Context, bytes []byte) ([]byte, *qgaerrors.ConnectionError) {
+	c.RLock()
+	defer c.RUnlock()
+
+	if c.IsClosedWhileLocked() {
+		return nil, qgaerrors.ErrConnectionClosed
 	}
-	bytes, err := connection.transport.Read()
+
+	if err := c.transport.Write(ctx, bytes); err != nil {
+		return nil, qgaerrors.NewConnectionError(err, qgaerrors.SendErrorKind)
+	}
+
+	responseBytes, err := c.transport.Read(ctx)
 	if err != nil {
-		return bytes, NewQmpConnectionError(err, SendErrorKind)
+		return responseBytes, qgaerrors.NewConnectionError(err, qgaerrors.SendErrorKind)
 	}
-	return bytes, nil
+	return responseBytes, nil
 }
 
-func (connection *connection) Close() error {
-	if err := connection.transport.Close(); err != nil {
-		return NewQmpConnectionError(err, CloseErrorKind)
+func (c *qmpConnection) SendAsync(ctx context.Context, bytes []byte) <-chan AsyncResult {
+	c.RLock()
+
+	resultCh := c.pool.Get().(chan AsyncResult)
+	
+	// Drain any stale data from pooled channel
+	select {
+	case <-resultCh:
+	default:
+	}
+
+	if c.IsClosedWhileLocked() {
+		c.RUnlock() // Manual unlock to avoid defer overhead
+		resultCh <- AsyncResult{
+			Data: nil,
+			Err:  qgaerrors.ErrConnectionClosed,
+		}
+		return resultCh
+	}
+
+	reqID := atomic.AddUint64(&c.requestCounter, 1)
+	
+	// Protect map write with full mutex
+	c.RUnlock()
+	c.Lock()
+	c.pendingReqs[reqID] = resultCh
+	c.Unlock()
+
+	// Use optimized goroutine with closure optimization
+	go func(localCtx context.Context, localBytes []byte, localResultCh chan AsyncResult, localReqID uint64) {
+		defer func() {
+			c.Lock()
+			delete(c.pendingReqs, localReqID)
+			c.Unlock()
+			c.pool.Put(localResultCh)
+		}()
+
+		if err := c.transport.Write(localCtx, localBytes); err != nil {
+			localResultCh <- AsyncResult{
+				Data: nil,
+				Err:  qgaerrors.NewConnectionError(err, qgaerrors.SendErrorKind),
+			}
+			return
+		}
+
+		responseBytes, err := c.transport.Read(localCtx)
+		if err != nil {
+			localResultCh <- AsyncResult{
+				Data: responseBytes,
+				Err:  qgaerrors.NewConnectionError(err, qgaerrors.SendErrorKind),
+			}
+			return
+		}
+
+		localResultCh <- AsyncResult{
+			Data: responseBytes,
+			Err:  nil,
+		}
+	}(ctx, bytes, resultCh, reqID)
+
+	return resultCh
+}
+
+func (c *qmpConnection) Close() error {
+	c.Lock()
+	defer c.Unlock()
+
+	if c.IsClosedWhileLocked() {
+		return nil
+	}
+
+	c.CloseWithLock()
+
+	// Cancel all pending requests
+	for _, ch := range c.pendingReqs {
+		ch <- AsyncResult{
+			Data: nil,
+			Err:  qgaerrors.NewConnectionError(fmt.Errorf("connection closed"), qgaerrors.CloseErrorKind),
+		}
+	}
+
+
+	if err := c.transport.Close(); err != nil {
+		return qgaerrors.NewConnectionError(err, qgaerrors.CloseErrorKind)
 	}
 	return nil
 }

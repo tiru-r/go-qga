@@ -14,35 +14,35 @@
 
 package errors
 
-type QmpConnectionError struct {
+type ConnectionError struct {
 	wrappedError error
-	kind         QmpConnectionErrorKind
+	kind         ConnectionErrorKind
 }
 
-func NewQmpConnectionError(wrappedError error, errorType QmpConnectionErrorKind) *QmpConnectionError {
-	return &QmpConnectionError{wrappedError: wrappedError, kind: errorType}
+func NewConnectionError(wrappedError error, errorType ConnectionErrorKind) *ConnectionError {
+	return &ConnectionError{wrappedError: wrappedError, kind: errorType}
 }
 
-func (err *QmpConnectionError) Domain() DomainType {
-	return QmpConnectionDomain
+func (err *ConnectionError) Domain() DomainType {
+	return ConnectionDomain
 }
 
-func (err *QmpConnectionError) Kind() string {
+func (err *ConnectionError) Kind() string {
 	return string(err.kind)
 }
 
-func (err *QmpConnectionError) Unwrap() error {
+func (err *ConnectionError) Unwrap() error {
 	return err.wrappedError
 }
 
-func (connectionError *QmpConnectionError) Error() string {
-	return formatErrorMessage(connectionError)
+func (err *ConnectionError) Error() string {
+	return formatErrorMessage(err)
 }
 
-type QmpConnectionErrorKind string
+type ConnectionErrorKind string
 
 const (
-	UnknownErrorKind QmpConnectionErrorKind = "Unknown"
+	UnknownErrorKind ConnectionErrorKind = "Unknown"
 	ConnectErrorKind                        = "Connect"
 	SendErrorKind                           = "Send"
 	ReadErrorKind                           = "Read"

@@ -15,7 +15,11 @@
 package transport
 
 import (
-	. "github.com/prevostcorentin/go-qga/internal/errors"
+	"context"
+	"fmt"
+
+	"github.com/prevostcorentin/go-qga/internal/common"
+	"github.com/prevostcorentin/go-qga/internal/errors"
 )
 
 type TransportType string
@@ -25,18 +29,21 @@ const (
 )
 
 type Transport interface {
-	Connect() *TransportError
+	Connect(ctx context.Context) *errors.TransportError
 	Close() error
 	Path() string
-	Read() ([]byte, error)
-	Write(bytes []byte) error
+	Read(ctx context.Context) ([]byte, error)
+	Write(ctx context.Context, bytes []byte) error
 }
 
-func NewTransport(transportType TransportType, path string) Transport {
-	var transport Transport
+func NewTransport(transportType TransportType, path string) (Transport, error) {
 	switch transportType {
 	case Unix:
-		transport = &unixTransport{path: path}
+		return &unixTransport{
+			BaseState: common.NewBaseState(),
+			path:      path,
+		}, nil
+	default:
+		return nil, fmt.Errorf("unsupported transport type: %s", transportType)
 	}
-	return transport
 }

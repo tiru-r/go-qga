@@ -15,6 +15,7 @@
 package qmp_test
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -27,16 +28,25 @@ const expectedCommandResponse = "777 holy trinity"
 
 type fakeConnection struct{}
 
-func (_ *fakeConnection) Connect(_ string) *QmpConnectionError {
+func (_ *fakeConnection) Connect(ctx context.Context, _ string) *ConnectionError {
 	return nil
 }
 
-func (_ *fakeConnection) Send(_ []byte) ([]byte, *QmpConnectionError) {
+func (_ *fakeConnection) Send(ctx context.Context, _ []byte) ([]byte, *ConnectionError) {
 	response := struct {
 		Return *testCommandResponse `json:"return"`
 	}{Return: &testCommandResponse{Value: expectedCommandResponse}}
 	responseBytes, _ := json.Marshal(response)
 	return responseBytes, nil
+}
+
+func (fc *fakeConnection) SendAsync(ctx context.Context, bytes []byte) <-chan qmp.AsyncResult {
+	ch := make(chan qmp.AsyncResult, 1)
+	go func() {
+		data, err := fc.Send(ctx, bytes)
+		ch <- qmp.AsyncResult{Data: data, Err: err}
+	}()
+	return ch
 }
 
 func (_ *fakeConnection) Close() error {
@@ -64,8 +74,12 @@ func (_ *testCommand) Response() any {
 }
 
 func TestRunCommand(t *testing.T) {
-	executor := qmp.NewExecutor(&fakeConnection{})
-	response, err := executor.Run(&testCommand{})
+	executor, err := qmp.NewExecutor(&fakeConnection{})
+	if err != nil {
+		t.Fatalf("creating executor: %v", err)
+	}
+	ctx := context.Background()
+	response, err := executor.Run(ctx, &testCommand{})
 	if err != nil {
 		t.Fatalf("while running command: %v", err)
 	}
@@ -94,24 +108,28 @@ func (_ *testCommandRecursive) Response() any {
 }
 
 func TestMarshalFailure(t *testing.T) {
-	executor := qmp.NewExecutor(&fakeConnection{})
+	executor, err := qmp.NewExecutor(&fakeConnection{})
+	if err != nil {
+		t.Fatalf("creating executor: %v", err)
+	}
 	failingCommand := &testCommandRecursive{}
-	_, err := executor.Run(failingCommand)
-	if err == nil {
+	ctx := context.Background()
+	_, runErr := executor.Run(ctx, failingCommand)
+	if runErr == nil {
 		t.Fatal("should have raised an error")
 	}
-	if err.Domain() != CodecDomain {
-		t.Errorf(`wrong error domain "%v". expected "%s"`, err.Domain(), CodecDomain)
+	if runErr.Domain() != CodecDomain {
+		t.Errorf(`wrong error domain "%v". expected "%s"`, runErr.Domain(), CodecDomain)
 	}
 }
 
 type unmarshableResponseConnection struct{}
 
-func (_ *unmarshableResponseConnection) Connect(_ string) *QmpConnectionError {
+func (_ *unmarshableResponseConnection) Connect(ctx context.Context, _ string) *ConnectionError {
 	return nil
 }
 
-func (_ *unmarshableResponseConnection) Send(_ []byte) ([]byte, *QmpConnectionError) {
+func (_ *unmarshableResponseConnection) Send(ctx context.Context, _ []byte) ([]byte, *ConnectionError) {
 	return []byte("i am no object"), nil
 }
 
@@ -119,18 +137,31 @@ func (_ *unmarshableResponseConnection) Close() error {
 	return nil
 }
 
+func (uc *unmarshableResponseConnection) SendAsync(ctx context.Context, bytes []byte) <-chan qmp.AsyncResult {
+	ch := make(chan qmp.AsyncResult, 1)
+	go func() {
+		data, err := uc.Send(ctx, bytes)
+		ch <- qmp.AsyncResult{Data: data, Err: err}
+	}()
+	return ch
+}
+
 func TestUnmarshalResponseTopLevelFailure(t *testing.T) {
-	executor := qmp.NewExecutor(&unmarshableResponseConnection{})
+	executor, err := qmp.NewExecutor(&unmarshableResponseConnection{})
+	if err != nil {
+		t.Fatalf("creating executor: %v", err)
+	}
 	failingCommand := &testCommand{}
-	var err QgaError
-	if _, err = executor.Run(failingCommand); err == nil {
+	var runErr QgaError
+	ctx := context.Background()
+	if _, runErr = executor.Run(ctx, failingCommand); runErr == nil {
 		t.Errorf("there should have been an error here")
 	}
-	if err.Domain() != CodecDomain {
-		t.Errorf(`wrong error domain "%v". expected "%s"`, err.Domain(), CodecDomain)
+	if runErr.Domain() != CodecDomain {
+		t.Errorf(`wrong error domain "%v". expected "%s"`, runErr.Domain(), CodecDomain)
 	}
-	if err.Kind() != string(Unmarshal) {
-		t.Errorf(`wrong error kind "%v". expected "%s"`, err.Kind(), Unmarshal)
+	if runErr.Kind() != string(Unmarshal) {
+		t.Errorf(`wrong error kind "%v". expected "%s"`, runErr.Kind(), Unmarshal)
 	}
 }
 
@@ -153,28 +184,41 @@ type childUnmarshableResponse struct {
 }
 
 func TestUnmarshalResponseReturnsFailure(t *testing.T) {
-	executor := qmp.NewExecutor(&fakeConnection{})
+	executor, err := qmp.NewExecutor(&fakeConnection{})
+	if err != nil {
+		t.Fatalf("creating executor: %v", err)
+	}
 	failingCommand := &childUnmarshalFailureCommand{}
-	var err QgaError
-	if _, err = executor.Run(failingCommand); err == nil {
+	var runErr QgaError
+	ctx := context.Background()
+	if _, runErr = executor.Run(ctx, failingCommand); runErr == nil {
 		t.Errorf("there should have been an error here")
 	}
-	if err.Domain() != CodecDomain {
-		t.Errorf(`wrong error domain "%v". expected "%s"`, err.Domain(), CodecDomain)
+	if runErr.Domain() != CodecDomain {
+		t.Errorf(`wrong error domain "%v". expected "%s"`, runErr.Domain(), CodecDomain)
 	}
-	if err.Kind() != string(Unmarshal) {
-		t.Errorf(`wrong error kind "%v". expected "%s"`, err.Kind(), Unmarshal)
+	if runErr.Kind() != string(Unmarshal) {
+		t.Errorf(`wrong error kind "%v". expected "%s"`, runErr.Kind(), Unmarshal)
 	}
 }
 
 type sendFailureConnection struct{}
 
-func (_ *sendFailureConnection) Connect(_ string) *QmpConnectionError {
+func (_ *sendFailureConnection) Connect(ctx context.Context, _ string) *ConnectionError {
 	return nil
 }
 
-func (_ *sendFailureConnection) Send(_ []byte) ([]byte, *QmpConnectionError) {
-	return nil, NewQmpConnectionError(fmt.Errorf("I am designed to fail"), SendErrorKind)
+func (_ *sendFailureConnection) Send(ctx context.Context, _ []byte) ([]byte, *ConnectionError) {
+	return nil, NewConnectionError(fmt.Errorf("I am designed to fail"), SendErrorKind)
+}
+
+func (sfc *sendFailureConnection) SendAsync(ctx context.Context, bytes []byte) <-chan qmp.AsyncResult {
+	ch := make(chan qmp.AsyncResult, 1)
+	go func() {
+		data, err := sfc.Send(ctx, bytes)
+		ch <- qmp.AsyncResult{Data: data, Err: err}
+	}()
+	return ch
 }
 
 func (_ *sendFailureConnection) Close() error {
@@ -182,27 +226,31 @@ func (_ *sendFailureConnection) Close() error {
 }
 
 func TestConnectionSendFailure(t *testing.T) {
-	executor := qmp.NewExecutor(&sendFailureConnection{})
+	executor, err := qmp.NewExecutor(&sendFailureConnection{})
+	if err != nil {
+		t.Fatalf("creating executor: %v", err)
+	}
 	failingCommand := &testCommand{}
-	var err QgaError
-	if _, err = executor.Run(failingCommand); err == nil {
+	var runErr QgaError
+	ctx := context.Background()
+	if _, runErr = executor.Run(ctx, failingCommand); runErr == nil {
 		t.Errorf("there should have been an error here")
 	}
-	if err.Domain() != QmpConnectionDomain {
-		t.Errorf(`wrong error domain "%v". expected "%s"`, err.Domain(), QmpConnectionDomain)
+	if runErr.Domain() != ConnectionDomain {
+		t.Errorf(`wrong error domain "%v". expected "%s"`, runErr.Domain(), ConnectionDomain)
 	}
-	if err.Kind() != string(SendErrorKind) {
-		t.Errorf(`wrong error kind "%v". expected "%s"`, err.Kind(), SendErrorKind)
+	if runErr.Kind() != string(SendErrorKind) {
+		t.Errorf(`wrong error kind "%v". expected "%s"`, runErr.Kind(), SendErrorKind)
 	}
 }
 
 type missingReturnsConnection struct{}
 
-func (_ *missingReturnsConnection) Connect(_ string) *QmpConnectionError {
+func (_ *missingReturnsConnection) Connect(ctx context.Context, _ string) *ConnectionError {
 	return nil
 }
 
-func (_ *missingReturnsConnection) Send(_ []byte) ([]byte, *QmpConnectionError) {
+func (_ *missingReturnsConnection) Send(ctx context.Context, _ []byte) ([]byte, *ConnectionError) {
 	response := struct {
 		MissingReturn *testCommandResponse `json:"missing_return"`
 	}{MissingReturn: &testCommandResponse{Value: expectedCommandResponse}}
@@ -210,21 +258,34 @@ func (_ *missingReturnsConnection) Send(_ []byte) ([]byte, *QmpConnectionError) 
 	return responseBytes, nil
 }
 
+func (mrc *missingReturnsConnection) SendAsync(ctx context.Context, bytes []byte) <-chan qmp.AsyncResult {
+	ch := make(chan qmp.AsyncResult, 1)
+	go func() {
+		data, err := mrc.Send(ctx, bytes)
+		ch <- qmp.AsyncResult{Data: data, Err: err}
+	}()
+	return ch
+}
+
 func (_ *missingReturnsConnection) Close() error {
 	return nil
 }
 
 func TestNoReturnsFailure(t *testing.T) {
-	executor := qmp.NewExecutor(&missingReturnsConnection{})
+	executor, err := qmp.NewExecutor(&missingReturnsConnection{})
+	if err != nil {
+		t.Fatalf("creating executor: %v", err)
+	}
 	failingCommand := &testCommand{}
-	var err QgaError
-	if _, err = executor.Run(failingCommand); err == nil {
+	var runErr QgaError
+	ctx := context.Background()
+	if _, runErr = executor.Run(ctx, failingCommand); runErr == nil {
 		t.Errorf("there should have been an error here")
 	}
-	if err.Domain() != CodecDomain {
-		t.Errorf(`wrong error domain "%v". expected "%s"`, err.Domain(), CodecDomain)
+	if runErr.Domain() != CodecDomain {
+		t.Errorf(`wrong error domain "%v". expected "%s"`, runErr.Domain(), CodecDomain)
 	}
-	if err.Kind() != string(Key) {
-		t.Errorf(`wrong error kind "%v". expected "%s"`, err.Kind(), Unmarshal)
+	if runErr.Kind() != string(Key) {
+		t.Errorf(`wrong error kind "%v". expected "%s"`, runErr.Kind(), Key)
 	}
 }

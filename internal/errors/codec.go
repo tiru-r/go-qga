@@ -23,7 +23,7 @@ func NewCodecError(wrappedError error, kind CodecErrorKind) *CodecError {
 	return &CodecError{wrappedError: wrappedError, kind: kind}
 }
 
-func (_ *CodecError) Domain() DomainType {
+func (codecError *CodecError) Domain() DomainType {
 	return CodecDomain
 }
 

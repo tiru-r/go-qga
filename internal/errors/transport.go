@@ -23,7 +23,7 @@ func NewTransportError(wrappedError error, kind TransportErrorKind) *TransportEr
 	return &TransportError{wrappedError: wrappedError, kind: kind}
 }
 
-func (_ *TransportError) Domain() DomainType {
+func (transportError *TransportError) Domain() DomainType {
 	return TransportDomain
 }
 
@@ -35,8 +35,8 @@ func (transportError *TransportError) Unwrap() error {
 	return transportError.wrappedError
 }
 
-func (err *TransportError) Error() string {
-	return formatErrorMessage(err)
+func (transportError *TransportError) Error() string {
+	return formatErrorMessage(transportError)
 }
 
 type TransportErrorKind string
