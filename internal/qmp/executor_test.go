@@ -22,7 +22,7 @@ import (
 )
 
 func TestExecutor(t *testing.T) {
-	// Create simple test agent
+	// Create test agent
 	behavior := qgatesting.DefaultAgentBehavior()
 	agent, cleanup := qgatesting.SetupAgentWithBehavior(t, behavior)
 	defer cleanup()

@@ -198,7 +198,7 @@ func TestNoWrite(t *testing.T) {
 	if writeError = transport.Write(ctx, largePayload); writeError == nil {
 		t.Fatal("there should have been an error here")
 	}
-	// Just verify an error occurred (simplified error handling)
+	// Verify an error occurred
 	if writeError == nil {
 		t.Error("expected write error but got none")
 	}
@@ -223,7 +223,7 @@ func TestNoRead(t *testing.T) {
 	if _, readError = transport.Read(ctx); readError == nil {
 		t.Fatal("there should have been an error here")
 	}
-	// Just verify an error occurred (simplified error handling)
+	// Verify an error occurred
 	if readError == nil {
 		t.Error("expected read error but got none")
 	}

@@ -22,10 +22,10 @@ import (
 )
 
 func TestQmpClient(t *testing.T) {
-	// Create a simple test - look how easy this is!
+	// Create test socket path
 	socketPath := qgatesting.BuildSocketPath("client-test")
 	
-	// Connect with one simple call
+	// Connect to QMP socket
 	client, err := Connect(socketPath)
 	if err != nil {
 		t.Skipf("Failed to connect (no agent running): %v", err)
@@ -33,7 +33,7 @@ func TestQmpClient(t *testing.T) {
 	}
 	defer client.Close()
 
-	// Get hostname with one simple call  
+	// Get hostname
 	hostname, err := client.GetHostname()
 	if err != nil {
 		t.Skipf("Failed to get hostname: %v", err)
@@ -47,12 +47,12 @@ func TestQmpClient(t *testing.T) {
 }
 
 func TestQmpClientWithAgent(t *testing.T) {
-	// Create simple test agent
+	// Create test agent
 	behavior := qgatesting.DefaultAgentBehavior()
 	agent, cleanup := qgatesting.SetupAgentWithBehavior(t, behavior)
 	defer cleanup()
 
-	// Simple connection and test
+	// Connect and test
 	client, err := Connect(agent.Path())
 	if err != nil {
 		t.Fatalf("Failed to connect: %v", err)
