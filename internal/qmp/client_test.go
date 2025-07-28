@@ -52,6 +52,9 @@ func TestQmpClientWithAgent(t *testing.T) {
 	agent, cleanup := qgatesting.SetupAgentWithBehavior(t, behavior)
 	defer cleanup()
 
+	// Small delay to ensure socket is fully ready for connections
+	time.Sleep(10 * time.Millisecond)
+
 	// Connect and test
 	client, err := Connect(agent.Path())
 	if err != nil {

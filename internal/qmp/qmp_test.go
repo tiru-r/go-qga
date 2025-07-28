@@ -173,10 +173,9 @@ func TestHostnameCommandWithStructuredAgent(t *testing.T) {
 		handleConnection(t, conn)
 	}
 
+	done := make(chan error, 1)
 	go func() {
-		if err := agent.Serve(ctx, handler); err != nil && err != context.DeadlineExceeded && err != context.Canceled {
-			t.Logf("agent serve error (may be normal during cleanup): %v", err)
-		}
+		done <- agent.Serve(ctx, handler)
 	}()
 
 	agent.WaitReady()
@@ -194,6 +193,9 @@ func TestHostnameCommandWithStructuredAgent(t *testing.T) {
 	if hostname != "fake-vm" {
 		t.Errorf(`vm name differs (got "%s", expecting "fake-vm")`, hostname)
 	}
+
+	// Wait for the serve goroutine to complete
+	<-done
 }
 
 // Robust test using the new testing infrastructure

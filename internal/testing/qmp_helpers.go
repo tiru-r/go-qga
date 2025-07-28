@@ -66,10 +66,32 @@ func BuildSocketPath(name string) string {
 	return fmt.Sprintf("/tmp/%s.sock", name)
 }
 
-// NewSocketAgent creates a new socket agent
+// NewSocketAgent creates a new socket agent with validation
 func NewSocketAgent(config SocketAgentConfig) *SimpleTestAgent {
+	// Validate configuration - panic on invalid configs as expected by tests
+	if config.SocketPath == "" {
+		panic("socket path cannot be empty")
+	}
+	
+	if config.MaxConnections < -1 {
+		panic("max connections cannot be negative (except -1 for default)")
+	}
+	
+	if config.MaxConnections > 1000000 {
+		panic("max connections too large")
+	}
+	
+	if config.ReadTimeout < 0 {
+		panic("read timeout cannot be negative")
+	}
+	
+	if config.BufferSize < -1 {
+		panic("buffer size cannot be negative (except -1 for default)")
+	}
+	
 	return NewSimpleTestAgent(config.SocketPath)
 }
+
 
 // QMP message types for reusability
 type QemuVersion struct {

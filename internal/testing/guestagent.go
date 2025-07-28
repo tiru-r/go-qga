@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net"
 	"os"
+	"strings"
 	"sync"
 	"time"
 )
@@ -28,6 +29,34 @@ type SimpleTestAgent struct {
 	socketPath string
 	listener   net.Listener
 	ready      chan struct{}
+}
+
+// validateSocketPath checks if a socket path is safe for testing
+func validateSocketPath(path string) error {
+	// Block unsafe paths for security
+	unsafePaths := []string{
+		"/etc/",
+		"/usr/",
+		"/bin/",
+		"/sbin/",
+		"/sys/",
+		"/proc/",
+		"/dev/",
+		"/root/",
+	}
+	
+	for _, unsafePath := range unsafePaths {
+		if len(path) >= len(unsafePath) && path[:len(unsafePath)] == unsafePath {
+			return fmt.Errorf("unsafe socket path: %s", path)
+		}
+	}
+	
+	// Check for path traversal patterns
+	if strings.Contains(path, "../") || strings.Contains(path, "..\\") {
+		return fmt.Errorf("path traversal not allowed: %s", path)
+	}
+	
+	return nil
 }
 
 // NewSimpleTestAgent creates a simple test agent
@@ -84,6 +113,11 @@ func (a *SimpleTestAgent) Accept() (net.Conn, error) {
 
 // Serve runs a simple echo server for testing with proper concurrent connection handling
 func (a *SimpleTestAgent) Serve(ctx context.Context, handler func(net.Conn)) error {
+	// Validate socket path for security
+	if err := validateSocketPath(a.socketPath); err != nil {
+		return err
+	}
+	
 	if err := a.Start(); err != nil {
 		return err
 	}
