@@ -14,26 +14,30 @@
 
 package errors
 
-
-type QgaError interface {
-	error
-	Domain() DomainType
-	Kind() string
-	Unwrap() error
-}
-
-type DomainType string
-
-const (
-	TransportDomain     DomainType = "Transport"
-	ConnectionDomain               = "Connection"
-	ProtocolDomain                 = "Protocol"
-	CodecDomain                    = "Codec"
+import (
+	"errors"
+	"fmt"
 )
 
-func formatErrorMessage(err QgaError) string {
-	if underlying := err.Unwrap(); underlying != nil {
-		return "Error: " + string(err.Domain()) + " => " + underlying.Error()
-	}
-	return "Error: " + string(err.Domain()) + " => <nil>"
+// Simple Go error patterns - no complex hierarchies needed
+
+var (
+	ErrTransportClosed    = errors.New("transport is closed")
+	ErrConnectionClosed   = errors.New("connection is closed") 
+	ErrConnectionNil      = errors.New("connection is nil")
+	ErrInvalidMessage     = errors.New("invalid message format")
+	ErrTimeout           = errors.New("operation timed out")
+	ErrExecutorClosed     = errors.New("executor is closed")
+	ErrCommandNil         = errors.New("command cannot be nil")
+	ErrMissingReturn      = errors.New("missing return field in QGA response")
+)
+
+// Wrap creates a simple wrapped error - idiomatic Go
+func Wrap(err error, msg string) error {
+	return fmt.Errorf("%s: %w", msg, err)
+}
+
+// Wrapf creates a simple wrapped error with formatting
+func Wrapf(err error, format string, args ...any) error {
+	return fmt.Errorf(format+": %w", append(args, err)...)
 }

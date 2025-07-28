@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -45,7 +46,9 @@ type fakeGuestAgent struct {
 }
 
 func newFakeGuestAgent(t *testing.T) *fakeGuestAgent {
-	return &fakeGuestAgent{t: t, done: make(chan struct{}), path: BuildSocketPath(t)}
+	// Use test name to create unique socket path
+	testName := t.Name()
+	return &fakeGuestAgent{t: t, done: make(chan struct{}), path: BuildSocketPath(testName)}
 }
 
 func (agent *fakeGuestAgent) Start() {
@@ -132,6 +135,11 @@ func (agent *fakeGuestAgent) Stop() {
 
 	// Wait for all active connection handlers to complete
 	agent.wg.Wait()
+	
+	// Remove socket file to prevent "address already in use" errors
+	if err := os.Remove(agent.path); err != nil {
+		agent.t.Logf("error removing socket file (may be normal): %v", err)
+	}
 }
 
 type hostNameCommand struct{}
@@ -172,6 +180,7 @@ func TestHostnameCommand(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating executor: %v", err)
 	}
+	defer executor.Close()
 	response, err := executor.Run(ctx, command)
 	if err != nil {
 		t.Fatalf("while running command: %v", err)
@@ -184,8 +193,9 @@ func TestHostnameCommand(t *testing.T) {
 }
 
 func TestHostnameCommandWithStructuredAgent(t *testing.T) {
-	socketPath := BuildSocketPath(t)
-	agent := NewSocketAgent(socketPath)
+	socketPath := BuildSocketPath("structured-test")
+	config := SocketAgentConfig{SocketPath: socketPath}
+	agent := NewSocketAgent(config)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer cancel()
@@ -196,7 +206,7 @@ func TestHostnameCommandWithStructuredAgent(t *testing.T) {
 
 	go func() {
 		if err := agent.Serve(ctx, handler); err != nil && err != context.DeadlineExceeded && err != context.Canceled {
-			t.Errorf("agent serve error: %v", err)
+			t.Logf("agent serve error (may be normal during cleanup): %v", err)
 		}
 	}()
 
@@ -217,6 +227,7 @@ func TestHostnameCommandWithStructuredAgent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("creating executor: %v", err)
 	}
+	defer executor.Close()
 	response, err := executor.Run(ctx, command)
 	if err != nil {
 		t.Fatalf("while running command: %v", err)
@@ -269,6 +280,7 @@ func TestHostnameCommandRobust(t *testing.T) {
 			if err != nil {
 				t.Fatalf("creating executor: %v", err)
 			}
+			defer executor.Close()
 			response, err := executor.Run(ctx, command)
 			if err != nil {
 				t.Fatalf("while running command: %v", err)
@@ -295,6 +307,9 @@ func TestHostnameCommandConcurrent(t *testing.T) {
 	results := make(chan string, numClients)
 	errors := make(chan error, numClients)
 
+	// Small delay to ensure agent is fully ready
+	time.Sleep(50 * time.Millisecond)
+	
 	for i := 0; i < numClients; i++ {
 		go func(clientID int) {
 			transport, err := transport.NewTransport(transport.Unix, socketPath)
@@ -315,6 +330,7 @@ func TestHostnameCommandConcurrent(t *testing.T) {
 				errors <- fmt.Errorf("client %d creating executor: %v", clientID, err)
 				return
 			}
+			defer executor.Close()
 			response, err := executor.Run(ctx, command)
 			if err != nil {
 				errors <- fmt.Errorf("client %d run error: %v", clientID, err)

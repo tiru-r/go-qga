@@ -19,172 +19,50 @@ import (
 	"time"
 )
 
-// TimeManager provides centralized time management utilities
-type TimeManager struct {
-	defaultTimeout time.Duration
-	fastTimeout    time.Duration
-	slowTimeout    time.Duration
+// Simple time utilities - no over-engineered managers needed
+
+// SetConnectionTimeout sets deadline on connection - simple and direct
+func SetConnectionTimeout(conn net.Conn, timeout time.Duration) error {
+	return conn.SetDeadline(time.Now().Add(timeout))
 }
 
-// NewTimeManager creates a new time manager
-func NewTimeManager() *TimeManager {
-	return &TimeManager{
-		defaultTimeout: DefaultTimeout,
-		fastTimeout:    FastTimeout,
-		slowTimeout:    SlowTimeout,
-	}
+// SetDefaultTimeout sets a standard timeout on connection
+func SetDefaultTimeout(conn net.Conn) error {
+	return SetConnectionTimeout(conn, DefaultTimeout)
 }
 
-// GetDefaultTimeout returns the default timeout
-func (tm *TimeManager) GetDefaultTimeout() time.Duration {
-	return tm.defaultTimeout
+// TimeManager provides simple timeout management
+type TimeManager struct{}
+
+// SetReadDeadline sets read deadline with specified timeout
+func (t *TimeManager) SetReadDeadline(conn net.Conn, timeout time.Duration) error {
+	return conn.SetReadDeadline(time.Now().Add(timeout))
 }
 
-// GetFastTimeout returns the fast timeout
-func (tm *TimeManager) GetFastTimeout() time.Duration {
-	return tm.fastTimeout
+// SetReadDeadlineDefault sets default read deadline
+func (t *TimeManager) SetReadDeadlineDefault(conn net.Conn) error {
+	return conn.SetReadDeadline(time.Now().Add(DefaultTimeout))
 }
 
-// GetSlowTimeout returns the slow timeout
-func (tm *TimeManager) GetSlowTimeout() time.Duration {
-	return tm.slowTimeout
+// SetWriteDeadlineDefault sets default write deadline
+func (t *TimeManager) SetWriteDeadlineDefault(conn net.Conn) error {
+	return conn.SetWriteDeadline(time.Now().Add(DefaultTimeout))
 }
 
-// NowPlusDefault returns current time plus default timeout
-func (tm *TimeManager) NowPlusDefault() time.Time {
-	return time.Now().Add(tm.defaultTimeout)
+// SetDeadline sets general deadline
+func (t *TimeManager) SetDeadline(conn net.Conn, timeout time.Duration) error {
+	return conn.SetDeadline(time.Now().Add(timeout))
 }
 
-// NowPlusFast returns current time plus fast timeout
-func (tm *TimeManager) NowPlusFast() time.Time {
-	return time.Now().Add(tm.fastTimeout)
+// ClearDeadlines clears all deadlines
+func (t *TimeManager) ClearDeadlines(conn net.Conn) error {
+	return conn.SetDeadline(time.Time{})
 }
 
-// NowPlusSlow returns current time plus slow timeout
-func (tm *TimeManager) NowPlusSlow() time.Time {
-	return time.Now().Add(tm.slowTimeout)
+// NowPlus returns time.Now() + duration
+func (t *TimeManager) NowPlus(d time.Duration) time.Time {
+	return time.Now().Add(d)
 }
 
-// NowPlus returns current time plus specified duration
-func (tm *TimeManager) NowPlus(duration time.Duration) time.Time {
-	return time.Now().Add(duration)
-}
-
-// SetReadDeadlineDefault sets read deadline with default timeout
-func (tm *TimeManager) SetReadDeadlineDefault(conn net.Conn) error {
-	return conn.SetReadDeadline(tm.NowPlusDefault())
-}
-
-// SetWriteDeadlineDefault sets write deadline with default timeout
-func (tm *TimeManager) SetWriteDeadlineDefault(conn net.Conn) error {
-	return conn.SetWriteDeadline(tm.NowPlusDefault())
-}
-
-// SetDeadlineDefault sets both read and write deadlines with default timeout
-func (tm *TimeManager) SetDeadlineDefault(conn net.Conn) error {
-	return conn.SetDeadline(tm.NowPlusDefault())
-}
-
-// SetReadDeadlineFast sets read deadline with fast timeout
-func (tm *TimeManager) SetReadDeadlineFast(conn net.Conn) error {
-	return conn.SetReadDeadline(tm.NowPlusFast())
-}
-
-// SetWriteDeadlineFast sets write deadline with fast timeout
-func (tm *TimeManager) SetWriteDeadlineFast(conn net.Conn) error {
-	return conn.SetWriteDeadline(tm.NowPlusFast())
-}
-
-// SetDeadlineFast sets both deadlines with fast timeout
-func (tm *TimeManager) SetDeadlineFast(conn net.Conn) error {
-	return conn.SetDeadline(tm.NowPlusFast())
-}
-
-// SetReadDeadlineSlow sets read deadline with slow timeout
-func (tm *TimeManager) SetReadDeadlineSlow(conn net.Conn) error {
-	return conn.SetReadDeadline(tm.NowPlusSlow())
-}
-
-// SetWriteDeadlineSlow sets write deadline with slow timeout
-func (tm *TimeManager) SetWriteDeadlineSlow(conn net.Conn) error {
-	return conn.SetWriteDeadline(tm.NowPlusSlow())
-}
-
-// SetDeadlineSlow sets both deadlines with slow timeout
-func (tm *TimeManager) SetDeadlineSlow(conn net.Conn) error {
-	return conn.SetDeadline(tm.NowPlusSlow())
-}
-
-// SetReadDeadline sets read deadline with custom timeout
-func (tm *TimeManager) SetReadDeadline(conn net.Conn, timeout time.Duration) error {
-	return conn.SetReadDeadline(tm.NowPlus(timeout))
-}
-
-// SetWriteDeadline sets write deadline with custom timeout
-func (tm *TimeManager) SetWriteDeadline(conn net.Conn, timeout time.Duration) error {
-	return conn.SetWriteDeadline(tm.NowPlus(timeout))
-}
-
-// SetDeadline sets both deadlines with custom timeout
-func (tm *TimeManager) SetDeadline(conn net.Conn, timeout time.Duration) error {
-	return conn.SetDeadline(tm.NowPlus(timeout))
-}
-
-// ClearDeadlines clears all deadlines on a connection
-func (tm *TimeManager) ClearDeadlines(conn net.Conn) error {
-	zeroTime := time.Time{}
-	if err := conn.SetReadDeadline(zeroTime); err != nil {
-		return err
-	}
-	return conn.SetWriteDeadline(zeroTime)
-}
-
-// SleepDefault sleeps for default timeout duration
-func (tm *TimeManager) SleepDefault() {
-	time.Sleep(tm.defaultTimeout)
-}
-
-// SleepFast sleeps for fast timeout duration
-func (tm *TimeManager) SleepFast() {
-	time.Sleep(tm.fastTimeout)
-}
-
-// SleepSlow sleeps for slow timeout duration
-func (tm *TimeManager) SleepSlow() {
-	time.Sleep(tm.slowTimeout)
-}
-
-// Global time manager instance
-var GlobalTimeManager = NewTimeManager()
-
-// Convenience functions using global time manager
-
-// NowPlusDefault returns current time plus default timeout
-func NowPlusDefault() time.Time {
-	return GlobalTimeManager.NowPlusDefault()
-}
-
-// NowPlusFast returns current time plus fast timeout
-func NowPlusFast() time.Time {
-	return GlobalTimeManager.NowPlusFast()
-}
-
-// NowPlusSlow returns current time plus slow timeout
-func NowPlusSlow() time.Time {
-	return GlobalTimeManager.NowPlusSlow()
-}
-
-// SetDeadlineDefault sets both deadlines with default timeout
-func SetDeadlineDefault(conn net.Conn) error {
-	return GlobalTimeManager.SetDeadlineDefault(conn)
-}
-
-// SetDeadlineFast sets both deadlines with fast timeout
-func SetDeadlineFast(conn net.Conn) error {
-	return GlobalTimeManager.SetDeadlineFast(conn)
-}
-
-// SetDeadlineSlow sets both deadlines with slow timeout
-func SetDeadlineSlow(conn net.Conn) error {
-	return GlobalTimeManager.SetDeadlineSlow(conn)
-}
+// GlobalTimeManager provides global access to time utilities
+var GlobalTimeManager = &TimeManager{}

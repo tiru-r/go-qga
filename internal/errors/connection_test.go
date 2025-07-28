@@ -15,111 +15,84 @@
 package errors
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 )
 
-func TestConnectionError(t *testing.T) {
-	originalErr := fmt.Errorf("connection timeout")
-
+func TestConnectionErrors(t *testing.T) {
+	baseErr := errors.New("network timeout")
+	
 	tests := []struct {
-		name         string
-		wrappedError error
-		kind         ConnectionErrorKind
-		expectedKind string
+		name string
+		err  error
+		want string
+		base error
 	}{
 		{
-			name:         "connect_error",
-			wrappedError: originalErr,
-			kind:         ConnectErrorKind,
-			expectedKind: "Connect",
+			name: "connection_error",
+			err:  fmt.Errorf("connection error: %w", ErrConnectionClosed),
+			want: "connection error: connection is closed", 
+			base: ErrConnectionClosed,
 		},
 		{
-			name:         "send_error",
-			wrappedError: originalErr,
-			kind:         SendErrorKind,
-			expectedKind: "Send",
+			name: "connect_error",
+			err:  fmt.Errorf("failed to connect to /tmp/test.sock: %w", baseErr),
+			want: "failed to connect to /tmp/test.sock: network timeout",
+			base: baseErr,
 		},
 		{
-			name:         "read_error",
-			wrappedError: originalErr,
-			kind:         ReadErrorKind,
-			expectedKind: "Read",
+			name: "send_error",
+			err:  fmt.Errorf("send error: %w", ErrTimeout),
+			want: "send error: operation timed out",
+			base: ErrTimeout,
 		},
 		{
-			name:         "close_error",
-			wrappedError: originalErr,
-			kind:         CloseErrorKind,
-			expectedKind: "Close",
+			name: "read_error", 
+			err:  fmt.Errorf("read error: %w", baseErr),
+			want: "read error: network timeout",
+			base: baseErr,
 		},
 		{
-			name:         "unknown_error",
-			wrappedError: originalErr,
-			kind:         UnknownErrorKind,
-			expectedKind: "Unknown",
+			name: "close_error",
+			err:  fmt.Errorf("close error: %w", baseErr),
+			want: "close error: network timeout", 
+			base: baseErr,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := NewConnectionError(tt.wrappedError, tt.kind)
-
-			// Test Domain()
-			if err.Domain() != ConnectionDomain {
-				t.Errorf("Domain() = %v, want %v", err.Domain(), ConnectionDomain)
+			if tt.err.Error() != tt.want {
+				t.Errorf("got %q, want %q", tt.err.Error(), tt.want)
 			}
-
-			// Test Kind()
-			if err.Kind() != tt.expectedKind {
-				t.Errorf("Kind() = %v, want %v", err.Kind(), tt.expectedKind)
-			}
-
-			// Test Unwrap()
-			if err.Unwrap() != tt.wrappedError {
-				t.Errorf("Unwrap() = %v, want %v", err.Unwrap(), tt.wrappedError)
-			}
-
-			// Test Error()
-			expectedMsg := "Error: Connection => connection timeout"
-			if err.Error() != expectedMsg {
-				t.Errorf("Error() = %v, want %v", err.Error(), expectedMsg)
+			
+			if !errors.Is(tt.err, tt.base) {
+				t.Errorf("error should wrap %v", tt.base)
 			}
 		})
 	}
 }
 
-func TestConnectionErrorWithNilWrapped(t *testing.T) {
-	err := NewConnectionError(nil, ConnectErrorKind)
-
-	// Test Error() with nil wrapped error
-	expectedMsg := "Error: Connection => <nil>"
-	if err.Error() != expectedMsg {
-		t.Errorf("Error() = %v, want %v", err.Error(), expectedMsg)
+func TestConnectionErrorPatterns(t *testing.T) {
+	// Test the error patterns used in the simplified codebase
+	
+	// Pattern 1: Simple predefined errors
+	err1 := ErrConnectionNil
+	if err1.Error() != "connection is nil" {
+		t.Errorf("got %q, want %q", err1.Error(), "connection is nil")
 	}
-
-	// Test Unwrap() returns nil
-	if err.Unwrap() != nil {
-		t.Errorf("Unwrap() = %v, want nil", err.Unwrap())
+	
+	// Pattern 2: Wrapped errors with context
+	baseErr := errors.New("socket not found")
+	err2 := fmt.Errorf("connection error: %w", baseErr)
+	if !errors.Is(err2, baseErr) {
+		t.Error("wrapped error should be detectable with errors.Is")
 	}
-}
-
-func TestConnectionErrorKinds(t *testing.T) {
-	kinds := []struct {
-		kind     ConnectionErrorKind
-		expected string
-	}{
-		{UnknownErrorKind, "Unknown"},
-		{ConnectErrorKind, "Connect"},
-		{SendErrorKind, "Send"},
-		{ReadErrorKind, "Read"},
-		{CloseErrorKind, "Close"},
-	}
-
-	for _, k := range kinds {
-		t.Run(string(k.kind), func(t *testing.T) {
-			if string(k.kind) != k.expected {
-				t.Errorf("Kind constant = %v, want %v", string(k.kind), k.expected)
-			}
-		})
+	
+	// Pattern 3: Formatted errors with details
+	err3 := fmt.Errorf("failed to connect to %s: %w", "/tmp/test.sock", ErrTimeout)
+	if !errors.Is(err3, ErrTimeout) {
+		t.Error("formatted error should wrap original error")
 	}
 }

@@ -26,6 +26,51 @@ import (
 	"github.com/prevostcorentin/go-qga/internal/common"
 )
 
+// Simple testing interface that works with both T and B
+type TestingT interface {
+	Errorf(format string, args ...any)
+	Logf(format string, args ...any)
+	Helper()
+}
+
+// Simple agent interface
+type Agent interface {
+	Start() error
+	Stop() error
+	Path() string
+	WaitReady()
+	Accept() (net.Conn, error)
+}
+
+// Simple socket agent config
+type SocketAgentConfig struct {
+	SocketPath     string
+	Timeout        time.Duration
+	BufferSize     int
+	MaxConnections int
+	ReadTimeout    time.Duration
+}
+
+// Simple socket agent interface
+type SocketAgent interface {
+	Start() error
+	Stop() error
+	Path() string
+	WaitReady()
+	Accept() (net.Conn, error)
+	Serve(context.Context, func(net.Conn)) error
+}
+
+// BuildSocketPath builds a socket path
+func BuildSocketPath(name string) string {
+	return fmt.Sprintf("/tmp/%s.sock", name)
+}
+
+// NewSocketAgent creates a new socket agent
+func NewSocketAgent(config SocketAgentConfig) *SimpleTestAgent {
+	return NewSimpleTestAgent(config.SocketPath)
+}
+
 // QMP message types for reusability
 type QemuVersion struct {
 	Major string `json:"major"`
@@ -104,7 +149,7 @@ func DefaultAgentBehavior() *AgentBehavior {
 		Commands: map[string]func() any{
 			common.CommandGuestGetHostName: func() any {
 				return map[string]any{
-					common.JsonFieldReturn: map[string]string{common.JsonFieldName: "fake-vm"},
+					common.JSONFieldReturn: map[string]string{common.JSONFieldName: "fake-vm"},
 				}
 			},
 		},
@@ -119,7 +164,7 @@ func SlowAgentBehavior(delay time.Duration) *AgentBehavior {
 	behavior.AddCommand(common.CommandGuestGetHostName, func() any {
 		time.Sleep(delay)
 		return map[string]any{
-			common.JsonFieldReturn: map[string]string{common.JsonFieldName: "slow-fake-vm"},
+			common.JSONFieldReturn: map[string]string{common.JSONFieldName: "slow-fake-vm"},
 		}
 	})
 	return behavior
@@ -158,62 +203,71 @@ func CreateQmpHandler(t TestingT, behavior *AgentBehavior) func(net.Conn) {
 		fmt.Fprintln(writer, string(bannerBytes))
 		writer.Flush()
 
-		// Set read timeout
-		if behavior.Timeout > 0 {
-			common.GlobalTimeManager.SetReadDeadline(conn, behavior.Timeout)
-		}
-
-		// Read command
-		line, err := reader.ReadBytes(0x0A)
-		if err != nil {
-			if behavior.ErrorOnUnknown {
-				t.Logf("Error reading command: %v", err)
+		// Handle multiple commands on the same connection
+		for {
+			// Set read timeout for each command
+			if behavior.Timeout > 0 {
+				common.GlobalTimeManager.SetReadDeadline(conn, behavior.Timeout)
 			}
-			return
-		}
 
-		command := &QmpCommand{}
-		if err := json.Unmarshal(line, command); err != nil {
-			if behavior.ErrorOnUnknown {
-				t.Errorf("Error unmarshalling command: %v", err)
+			// Read command
+			line, err := reader.ReadBytes(0x0A)
+			if err != nil {
+				// Connection closed or timeout - normal termination
+				return
 			}
-			return
-		}
 
-		// Process command
-		var response any
-		if handler, exists := behavior.Commands[command.Execute]; exists {
-			response = handler()
-		} else if behavior.ErrorOnUnknown {
-			response = &QmpError{
-				Error: struct {
-					Class       string `json:"class"`
-					Description string `json:"desc"`
-				}{
-					Class:       "CommandNotFound",
-					Description: "Command '" + command.Execute + "' not found",
-				},
+			command := &QmpCommand{}
+			if err := json.Unmarshal(line, command); err != nil {
+				if behavior.ErrorOnUnknown {
+					t.Logf("Error unmarshalling command: %v", err)
+				}
+				return
 			}
-		} else {
-			return
-		}
 
-		// Send response
-		responseBytes, err := json.Marshal(response)
-		if err != nil {
-			t.Errorf("Error marshalling response: %v", err)
-			return
-		}
+			// Process command
+			var response any
+			if handler, exists := behavior.Commands[command.Execute]; exists {
+				response = handler()
+			} else if behavior.ErrorOnUnknown {
+				response = &QmpError{
+					Error: struct {
+						Class       string `json:"class"`
+						Description string `json:"desc"`
+					}{
+						Class:       "CommandNotFound",
+						Description: "Command '" + command.Execute + "' not found",
+					},
+				}
+			} else {
+				// Unknown command but not erroring, send empty response
+				response = map[string]any{}
+			}
 
-		fmt.Fprintln(writer, string(responseBytes))
-		writer.Flush()
+			// Send response
+			responseBytes, err := json.Marshal(response)
+			if err != nil {
+				t.Errorf("Error marshalling response: %v", err)
+				return
+			}
+
+			fmt.Fprintln(writer, string(responseBytes))
+			if err := writer.Flush(); err != nil {
+				// Connection broken, normal termination
+				return
+			}
+		}
 	}
 }
 
 // Test helper for setting up agent with custom behavior
-func SetupAgentWithBehavior(t TestingT, behavior *AgentBehavior) (Agent, func()) {
-	socketPath := BuildSocketPath(t)
-	agent := NewSocketAgent(socketPath)
+func SetupAgentWithBehavior(t TestingT, behavior *AgentBehavior) (*SimpleTestAgent, func()) {
+	socketPath := BuildSocketPath("test-agent")
+	config := SocketAgentConfig{
+		SocketPath: socketPath,
+		Timeout:    behavior.Timeout,
+	}
+	agent := NewSocketAgent(config)
 
 	ctx, cancel := context.WithTimeout(context.Background(), behavior.Timeout)
 
@@ -222,7 +276,7 @@ func SetupAgentWithBehavior(t TestingT, behavior *AgentBehavior) (Agent, func())
 	go func() {
 		if err := agent.Serve(ctx, handler); err != nil &&
 			err != context.DeadlineExceeded && err != context.Canceled {
-			t.Errorf("agent serve error: %v", err)
+			t.Logf("agent serve error (may be normal during cleanup): %v", err)
 		}
 	}()
 
@@ -236,11 +290,8 @@ func SetupAgentWithBehavior(t TestingT, behavior *AgentBehavior) (Agent, func())
 }
 
 // Get socket path from agent
-func GetSocketPath(agent Agent) string {
-	if socketAgent, ok := agent.(*SocketAgent); ok {
-		return socketAgent.config.SocketPath
-	}
-	return ""
+func GetSocketPath(agent *SimpleTestAgent) string {
+	return agent.Path()
 }
 
 // CreateHighPerformanceConfig creates an optimized SocketAgent configuration

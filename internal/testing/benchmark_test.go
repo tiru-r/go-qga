@@ -25,8 +25,12 @@ import (
 )
 
 func BenchmarkSocketAgentThroughput(b *testing.B) {
-	socketPath := BuildSocketPath(b)
-	agent := NewSocketAgent(socketPath)
+	socketPath := BuildSocketPath("bench-agent")
+	config := SocketAgentConfig{
+		SocketPath: socketPath,
+		Timeout:    30 * time.Second,
+	}
+	agent := NewSocketAgent(config)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -93,7 +97,7 @@ func BenchmarkAgentBehaviorFactory(b *testing.B) {
 func BenchmarkConcurrentAgents(b *testing.B) {
 	const numAgents = 10
 
-	agents := make([]Agent, numAgents)
+	agents := make([]*SimpleTestAgent, numAgents)
 	cleanups := make([]func(), numAgents)
 
 	for i := 0; i < numAgents; i++ {

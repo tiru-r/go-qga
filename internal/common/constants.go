@@ -26,11 +26,12 @@ const (
 
 // Common JSON field names to eliminate duplication
 const (
-	JsonFieldExecute = "execute"
-	JsonFieldReturn  = "return"
-	JsonFieldName    = "name"
-	JsonFieldQMP     = "QMP"
+	JSONFieldExecute = "execute"
+	JSONFieldReturn  = "return"
+	JSONFieldName    = "name"
+	JSONFieldQMP     = "QMP"
 )
+
 
 // Common QGA command names
 const (

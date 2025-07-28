@@ -16,49 +16,60 @@ package qmp
 
 import (
 	"encoding/json"
+	"fmt"
 	"net"
+	"sync"
 	"time"
 
 	"github.com/prevostcorentin/go-qga/internal/common"
 )
 
 // Connect creates a new optimistic QMP connection (deprecated: use NewClient)
-func Connect(socketPath string) common.Result[*Client] {
+func Connect(socketPath string) (*Client, error) {
 	return NewClient(socketPath)
 }
 
 // Client provides an optimistic, easy-to-use QMP client
 type Client struct {
+	mu     sync.RWMutex // Protect concurrent access
 	conn   net.Conn
 	path   string
 	buffer []byte
+	// Removed complex dependency injection - simpler is better
 }
 
-// NewClient creates a new optimistic QMP connection
-func NewClient(socketPath string) common.Result[*Client] {
+// NewClient creates a new optimistic QMP connection - simplified, no complex DI
+func NewClient(socketPath string) (*Client, error) {
 	// Optimistic: try connection with smart defaults
 	conn, err := net.DialTimeout("unix", socketPath, 5*time.Second)
 	if err != nil {
-		return common.Failure[*Client]("failed to connect to %s: %v", socketPath, err)
+		return nil, fmt.Errorf("failed to connect to %s: %v", socketPath, err)
 	}
 
 	client := &Client{
 		conn:   conn,
 		path:   socketPath,
-		buffer: common.GlobalBufferPool.GetLarge(), // Use buffer pool
+		buffer: common.GlobalBufferPool.GetLarge(), // Simple global access
 	}
 
 	// Optimistic banner consumption - ignore errors, just consume
 	client.consumeBanner()
 
-	return common.Success(client)
+	return client, nil
 }
 
 // Execute runs a QMP command with optimistic error handling
-func (c *Client) Execute(command string, args ...any) common.Result[map[string]any] {
+func (c *Client) Execute(command string, args ...any) (map[string]any, error) {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.conn == nil {
+		return nil, fmt.Errorf("client connection is closed")
+	}
+
 	// Build request with smart defaults
 	request := map[string]any{
-		common.JsonFieldExecute: command,
+		common.JSONFieldExecute: command,
 	}
 
 	// Add arguments only if provided (optimistic)
@@ -69,7 +80,7 @@ func (c *Client) Execute(command string, args ...any) common.Result[map[string]a
 	// Send request with optimistic JSON handling
 	jsonData, err := json.Marshal(request)
 	if err != nil {
-		return common.Failure[map[string]any]("failed to encode request: %v", err)
+		return nil, fmt.Errorf("failed to encode request: %v", err)
 	}
 
 	// Pre-allocate slice to avoid reallocation when appending line terminator
@@ -77,7 +88,7 @@ func (c *Client) Execute(command string, args ...any) common.Result[map[string]a
 	copy(data, jsonData)
 	data[len(jsonData)] = '\n'
 	if _, err := c.conn.Write(data); err != nil {
-		return common.Failure[map[string]any]("failed to send command: %v", err)
+		return nil, fmt.Errorf("failed to send command: %v", err)
 	}
 
 	// Read response with optimistic parsing
@@ -85,35 +96,46 @@ func (c *Client) Execute(command string, args ...any) common.Result[map[string]a
 }
 
 // GetHostname provides a simple, optimistic way to get VM hostname
-func (c *Client) GetHostname() common.Result[string] {
-	result := c.Execute(common.CommandGuestGetHostName)
-	if result.IsErr() {
-		return common.FailureFrom[string](result.Error())
+func (c *Client) GetHostname() (string, error) {
+	result, err := c.Execute(common.CommandGuestGetHostName)
+	if err != nil {
+		return "", err
 	}
 
-	response := result.Value()
-	if returnData, ok := response[common.JsonFieldReturn].(map[string]any); ok {
-		if hostname, ok := returnData[common.JsonFieldName].(string); ok {
-			return common.Success(hostname)
+	if returnData, ok := result[common.JSONFieldReturn].(map[string]any); ok {
+		if hostname, ok := returnData[common.JSONFieldName].(string); ok {
+			return hostname, nil
 		}
 	}
 
-	return common.Failure[string]("hostname not found in response")
+	return "", fmt.Errorf("hostname not found in response")
 }
 
 // Close closes the connection gracefully
 func (c *Client) Close() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
 	if c.conn != nil {
 		c.conn.Close()
+		c.conn = nil // Prevent double close
 	}
-	// Return buffer to pool
+	// Return buffer to simple global pool
 	if c.buffer != nil {
 		common.GlobalBufferPool.PutLarge(c.buffer)
+		c.buffer = nil // Prevent double return
 	}
 }
 
 // consumeBanner reads and discards the QMP banner (optimistic approach)
 func (c *Client) consumeBanner() {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	if c.conn == nil || c.buffer == nil {
+		return // Connection already closed
+	}
+
 	// Set a short timeout for banner reading
 	common.GlobalTimeManager.SetReadDeadline(c.conn, 1 * time.Second)
 	defer common.GlobalTimeManager.ClearDeadlines(c.conn) // Clear timeout
@@ -123,7 +145,12 @@ func (c *Client) consumeBanner() {
 }
 
 // readResponse reads and parses a QMP response optimistically
-func (c *Client) readResponse() common.Result[map[string]any] {
+func (c *Client) readResponse() (map[string]any, error) {
+	// Note: This method is called with read lock already held by Execute
+	if c.conn == nil || c.buffer == nil {
+		return nil, fmt.Errorf("client connection is closed")
+	}
+
 	// Set reasonable timeout
 	common.GlobalTimeManager.SetReadDeadline(c.conn, 10 * time.Second)
 	defer common.GlobalTimeManager.ClearDeadlines(c.conn) // Clear timeout
@@ -131,24 +158,24 @@ func (c *Client) readResponse() common.Result[map[string]any] {
 	// Read response
 	n, err := c.conn.Read(c.buffer)
 	if err != nil {
-		return common.Failure[map[string]any]("failed to read response: %v", err)
+		return nil, fmt.Errorf("failed to read response: %v", err)
 	}
 
 	// Parse JSON optimistically
 	var response map[string]any
 	if err := json.Unmarshal(c.buffer[:n], &response); err != nil {
-		return common.Failure[map[string]any]("failed to parse response: %v", err)
+		return nil, fmt.Errorf("failed to parse response: %v", err)
 	}
 
 	// Check for QMP errors optimistically
 	if errorData, hasError := response["error"]; hasError {
 		if errorInfo, ok := errorData.(map[string]any); ok {
 			if desc, ok := errorInfo["desc"].(string); ok {
-				return common.Failure[map[string]any]("QMP error: %s", desc)
+				return nil, fmt.Errorf("QMP error: %s", desc)
 			}
 		}
-		return common.Failure[map[string]any]("unknown QMP error occurred")
+		return nil, fmt.Errorf("unknown QMP error occurred")
 	}
 
-	return common.Success(response)
+	return response, nil
 }

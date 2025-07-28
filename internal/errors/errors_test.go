@@ -20,101 +20,113 @@ import (
 	"testing"
 )
 
-func TestFormatErrorMessage(t *testing.T) {
+func TestSimplifiedErrorApproach(t *testing.T) {
+	// Test that our simplified approach covers all the error scenarios
+	// that the complex error system was trying to handle
+	
 	tests := []struct {
-		name     string
-		err      QgaError
-		expected string
+		name        string
+		createError func() error
+		checkError  func(error) bool
+		description string
 	}{
 		{
-			name: "with_underlying_error",
-			err: &ConnectionError{
-				wrappedError: fmt.Errorf("connection failed"),
-				kind:         ConnectErrorKind,
+			name: "connection_errors",
+			createError: func() error {
+				return fmt.Errorf("connection failed: %w", ErrConnectionClosed)
 			},
-			expected: "Error: Connection => connection failed",
+			checkError: func(err error) bool {
+				return errors.Is(err, ErrConnectionClosed)
+			},
+			description: "Connection errors should be wrappable and checkable",
 		},
 		{
-			name: "with_nil_underlying",
-			err: &ConnectionError{
-				wrappedError: nil,
-				kind:         ConnectErrorKind,
+			name: "transport_errors", 
+			createError: func() error {
+				return fmt.Errorf("transport write failed: %w", ErrTransportClosed)
 			},
-			expected: "Error: Connection => <nil>",
+			checkError: func(err error) bool {
+				return errors.Is(err, ErrTransportClosed)
+			},
+			description: "Transport errors should be wrappable and checkable",
 		},
 		{
-			name: "transport_error",
-			err: &TransportError{
-				wrappedError: fmt.Errorf("write failed"),
-				kind:         Write,
+			name: "codec_errors",
+			createError: func() error {
+				baseErr := errors.New("invalid JSON")
+				return fmt.Errorf("marshal error: %w", baseErr)
 			},
-			expected: "Error: Transport => write failed",
+			checkError: func(err error) bool {
+				return err.Error() == "marshal error: invalid JSON"
+			}, 
+			description: "Codec errors should provide clear context",
 		},
 		{
-			name: "codec_error",
-			err: &CodecError{
-				wrappedError: fmt.Errorf("marshal failed"),
-				kind:         Marshal,
+			name: "timeout_errors",
+			createError: func() error {
+				return fmt.Errorf("operation timed out: %w", ErrTimeout)
 			},
-			expected: "Error: Codec => marshal failed",
+			checkError: func(err error) bool {
+				return errors.Is(err, ErrTimeout)
+			},
+			description: "Timeout errors should be identifiable",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := formatErrorMessage(tt.err)
-			if result != tt.expected {
-				t.Errorf("formatErrorMessage() = %q, want %q", result, tt.expected)
+			err := tt.createError()
+			if err == nil {
+				t.Error("expected error, got nil")
+			}
+			
+			if !tt.checkError(err) {
+				t.Errorf("error check failed for %s: %v", tt.description, err)
 			}
 		})
 	}
 }
 
-func TestQgaErrorInterface(t *testing.T) {
-	// Test that all error types implement QgaError interface
-	var _ QgaError = &ConnectionError{}
-	var _ QgaError = &TransportError{}
-	var _ QgaError = &CodecError{}
-}
-
-func TestDomainConstants(t *testing.T) {
-	tests := []struct {
-		domain   DomainType
-		expected string
-	}{
-		{TransportDomain, "Transport"},
-		{ConnectionDomain, "Connection"},
-		{ProtocolDomain, "Protocol"},
-		{CodecDomain, "Codec"},
+func TestErrorFormatting(t *testing.T) {
+	// Test that our simplified error formatting is clear and useful
+	baseErr := errors.New("network unreachable")
+	wrappedErr := fmt.Errorf("failed to connect to /tmp/qga.sock: %w", baseErr)
+	
+	expected := "failed to connect to /tmp/qga.sock: network unreachable"
+	if wrappedErr.Error() != expected {
+		t.Errorf("got %q, want %q", wrappedErr.Error(), expected)
 	}
-
-	for _, tt := range tests {
-		t.Run(string(tt.domain), func(t *testing.T) {
-			if string(tt.domain) != tt.expected {
-				t.Errorf("Domain constant = %q, want %q", string(tt.domain), tt.expected)
-			}
-		})
+	
+	// Test unwrapping
+	if !errors.Is(wrappedErr, baseErr) {
+		t.Error("wrapped error should be detectable")
 	}
 }
 
-func TestErrorUnwrapping(t *testing.T) {
-	originalErr := fmt.Errorf("original error")
-
-	// Test ConnectionError
-	connErr := NewConnectionError(originalErr, ConnectErrorKind)
-	if !errors.Is(connErr, originalErr) {
-		t.Error("ConnectionError should wrap original error")
+func TestAllPredefinedErrors(t *testing.T) {
+	// Ensure all our predefined errors work correctly
+	predefinedErrors := []error{
+		ErrTransportClosed,
+		ErrConnectionClosed,
+		ErrConnectionNil,
+		ErrInvalidMessage,
+		ErrTimeout,
+		ErrExecutorClosed,
 	}
-
-	// Test TransportError
-	transportErr := NewTransportError(originalErr, Connect)
-	if !errors.Is(transportErr, originalErr) {
-		t.Error("TransportError should wrap original error")
-	}
-
-	// Test CodecError
-	codecErr := NewCodecError(originalErr, Marshal)
-	if !errors.Is(codecErr, originalErr) {
-		t.Error("CodecError should wrap original error")
+	
+	for _, err := range predefinedErrors {
+		if err == nil {
+			t.Error("predefined error should not be nil")
+		}
+		
+		if err.Error() == "" {
+			t.Error("predefined error should have non-empty message")
+		}
+		
+		// Test that they can be wrapped
+		wrapped := fmt.Errorf("context: %w", err)
+		if !errors.Is(wrapped, err) {
+			t.Errorf("wrapped error should be detectable: %v", err)
+		}
 	}
 }

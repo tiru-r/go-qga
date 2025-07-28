@@ -17,10 +17,12 @@ package transport
 import (
 	"bufio"
 	"context"
+	"fmt"
 	"net"
+	"sync"
+	"sync/atomic"
 
 	"github.com/prevostcorentin/go-qga/internal/common"
-	"github.com/prevostcorentin/go-qga/internal/errors"
 )
 
 type unixTransport struct {
@@ -31,6 +33,8 @@ type unixTransport struct {
 	readCh     chan readResult
 	writeCh    chan writeRequest
 	done       chan struct{}
+	wg         sync.WaitGroup  // Track background goroutines
+	closed     int32           // Atomic flag to prevent multiple closes
 }
 
 type readResult struct {
@@ -43,18 +47,18 @@ type writeRequest struct {
 	resp chan error
 }
 
-func (t *unixTransport) Connect(ctx context.Context) *errors.TransportError {
+func (t *unixTransport) Connect(ctx context.Context) error {
 	t.Lock()
 	defer t.Unlock()
 
 	if t.IsClosedWhileLocked() {
-		return errors.ErrTransportClosed
+		return fmt.Errorf("transport is closed")
 	}
 
-	var d net.Dialer
+	d := &net.Dialer{}
 	conn, err := d.DialContext(ctx, "unix", t.path)
 	if err != nil {
-		return errors.NewTransportError(err, errors.Connect)
+		return fmt.Errorf("failed to connect to %s: %w", t.path, err)
 	}
 
 	t.connection = conn
@@ -68,19 +72,32 @@ func (t *unixTransport) Connect(ctx context.Context) *errors.TransportError {
 	t.writeCh = make(chan writeRequest, 10)
 	t.done = make(chan struct{})
 
-	// Start background goroutines
-	go t.readLoop()
-	go t.writeLoop()
+	// Start background goroutines with proper tracking
+	t.wg.Add(2) // Track both readLoop and writeLoop
+	go func() {
+		defer t.wg.Done()
+		t.readLoop()
+	}()
+	go func() {
+		defer t.wg.Done()
+		t.writeLoop()
+	}()
 
 	return nil
 }
 
 func (t *unixTransport) Write(ctx context.Context, bytes []byte) error {
+	// Check atomic closed flag first to avoid lock contention
+	if atomic.LoadInt32(&t.closed) != 0 {
+		return fmt.Errorf("transport is closed")
+	}
+
 	t.RLock()
 	defer t.RUnlock()
 
+	// Double-check with BaseState
 	if t.IsClosedWhileLocked() {
-		return errors.ErrTransportClosed
+		return fmt.Errorf("transport is closed")
 	}
 
 	resp := common.ErrorChannel()
@@ -95,57 +112,84 @@ func (t *unixTransport) Write(ctx context.Context, bytes []byte) error {
 		case err := <-resp:
 			return err
 		case <-ctx.Done():
-			return errors.NewTransportError(ctx.Err(), errors.Write)
+			return fmt.Errorf("write timeout: %w", ctx.Err())
 		}
 	case <-ctx.Done():
-		return errors.NewTransportError(ctx.Err(), errors.Write)
+		return fmt.Errorf("write timeout: %w", ctx.Err())
 	case <-t.done:
-		return errors.ErrTransportClosed
+		return fmt.Errorf("transport is closed")
 	}
 }
 
 func (t *unixTransport) Read(ctx context.Context) ([]byte, error) {
+	// Check atomic closed flag first to avoid lock contention
+	if atomic.LoadInt32(&t.closed) != 0 {
+		return nil, fmt.Errorf("transport is closed")
+	}
+
 	t.RLock()
 	defer t.RUnlock()
 
+	// Double-check with BaseState
 	if t.IsClosed() {
-		return nil, errors.ErrTransportClosed
+		return nil, fmt.Errorf("transport is closed")
 	}
 
 	select {
 	case result := <-t.readCh:
 		return result.data, result.err
 	case <-ctx.Done():
-		return nil, errors.NewTransportError(ctx.Err(), errors.Read)
+		return nil, fmt.Errorf("read timeout: %w", ctx.Err())
 	case <-t.done:
-		return nil, errors.ErrTransportClosed
+		return nil, fmt.Errorf("transport is closed")
 	}
 }
 
-func (transport *unixTransport) Path() string {
-	return transport.path
+func (u *unixTransport) Path() string {
+	return u.path
 }
 
-func (transport *unixTransport) Close() error {
-	transport.Lock()
-	defer transport.Unlock()
-
-	if !transport.CloseWithLock() {
-		return nil // already closed
+func (u *unixTransport) Close() error {
+	// Use atomic compare-and-swap to ensure only one close operation
+	if !atomic.CompareAndSwapInt32(&u.closed, 0, 1) {
+		return nil // Already closed by another goroutine
 	}
-	close(transport.done)
 
-	var firstErr error
+	// Get local references without holding any locks to avoid deadlock
+	doneChannel := u.done
+	connection := u.connection
+	pipe := u.pipe
 
-	if transport.pipe != nil {
-		if err := transport.pipe.Writer.Flush(); err != nil {
-			firstErr = errors.NewTransportError(err, errors.Flush)
+	// Signal goroutines to stop first
+	if doneChannel != nil {
+		select {
+		case <-doneChannel:
+			// Already closed
+		default:
+			close(doneChannel)
 		}
 	}
 
-	if transport.connection != nil {
-		if err := transport.connection.Close(); err != nil && firstErr == nil {
-			firstErr = errors.NewTransportError(err, errors.Close)
+	// Wait for background goroutines to terminate
+	u.wg.Wait()
+
+	// Now safely mark BaseState as closed
+	u.Lock()
+	u.CloseWithLock()
+	u.Unlock()
+
+	// Clean up resources without holding any locks
+	var firstErr error
+
+	if pipe != nil {
+		if err := pipe.Writer.Flush(); err != nil {
+			firstErr = fmt.Errorf("flush error: %w", err)
+		}
+	}
+
+	if connection != nil {
+		if err := connection.Close(); err != nil && firstErr == nil {
+			firstErr = fmt.Errorf("close error: %w", err)
 		}
 	}
 
@@ -158,10 +202,23 @@ func (t *unixTransport) readLoop() {
 		case <-t.done:
 			return
 		default:
-			// Set read timeout for blocking operation
+			// Check atomic flag first for early exit
+			if atomic.LoadInt32(&t.closed) != 0 {
+				return
+			}
+			
+			// Perform the entire read operation under lock to prevent race conditions
+			t.RLock()
+			if t.IsClosed() || t.connection == nil || t.pipe == nil {
+				t.RUnlock()
+				return // Transport was closed
+			}
+			
+			// Set read timeout for blocking operation (connection access is safe under lock)
 			if err := common.GlobalTimeManager.SetReadDeadlineDefault(t.connection); err != nil {
+				t.RUnlock()
 				select {
-				case t.readCh <- readResult{nil, errors.NewTransportError(err, errors.Read)}:
+				case t.readCh <- readResult{nil, fmt.Errorf("read error: %w", err)}:
 				case <-t.done:
 					return
 				}
@@ -170,6 +227,7 @@ func (t *unixTransport) readLoop() {
 
 			// Blocking read with timeout - much more efficient than polling
 			bytes, err := t.pipe.ReadBytes(common.LineTerminator)
+			t.RUnlock() // Release lock after read operation
 			result := readResult{bytes, nil}
 			if err != nil {
 				// Check if this is a timeout error vs actual error
@@ -177,7 +235,7 @@ func (t *unixTransport) readLoop() {
 					// Timeout is expected, continue reading
 					continue
 				}
-				result = readResult{nil, errors.NewTransportError(err, errors.Read)}
+				result = readResult{nil, fmt.Errorf("read error: %w", err)}
 			}
 			
 			select {
@@ -195,20 +253,38 @@ func (t *unixTransport) writeLoop() {
 		case <-t.done:
 			return
 		case req := <-t.writeCh:
-			// Set write timeout
+			// Check atomic flag first for early exit
+			if atomic.LoadInt32(&t.closed) != 0 {
+				req.resp <- fmt.Errorf("write failed: transport closed")
+				continue
+			}
+			
+			// Perform the entire write operation under lock to prevent race conditions
+			t.RLock()
+			if t.IsClosed() || t.connection == nil || t.pipe == nil {
+				t.RUnlock()
+				req.resp <- fmt.Errorf("write failed: transport closed")
+				continue
+			}
+			
+			// Set write timeout (connection access is safe under lock)
 			if err := common.GlobalTimeManager.SetWriteDeadlineDefault(t.connection); err != nil {
-				req.resp <- errors.NewTransportError(err, errors.Write)
+				t.RUnlock()
+				req.resp <- fmt.Errorf("write error: %w", err)
 				continue
 			}
 
 			if _, err := t.pipe.Write(req.data); err != nil {
-				req.resp <- errors.NewTransportError(err, errors.Write)
+				t.RUnlock()
+				req.resp <- fmt.Errorf("write error: %w", err)
 				continue
 			}
 
 			if err := t.pipe.Writer.Flush(); err != nil {
-				req.resp <- errors.NewTransportError(err, errors.Flush)
+				t.RUnlock()
+				req.resp <- fmt.Errorf("flush error: %w", err)
 			} else {
+				t.RUnlock()
 				req.resp <- nil
 			}
 		}

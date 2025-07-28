@@ -20,134 +20,81 @@ import (
 	"testing"
 )
 
-func TestCodecError(t *testing.T) {
-	originalErr := fmt.Errorf("invalid JSON")
-
+func TestSimpleErrors(t *testing.T) {
 	tests := []struct {
-		name         string
-		wrappedError error
-		kind         CodecErrorKind
-		expectedKind string
+		name string
+		err  error
+		want string
 	}{
 		{
-			name:         "marshal_error",
-			wrappedError: originalErr,
-			kind:         Marshal,
-			expectedKind: "Marshal",
+			name: "transport_closed",
+			err:  ErrTransportClosed,
+			want: "transport is closed",
 		},
 		{
-			name:         "unmarshal_error",
-			wrappedError: originalErr,
-			kind:         Unmarshal,
-			expectedKind: "Unmarshal",
+			name: "connection_closed", 
+			err:  ErrConnectionClosed,
+			want: "connection is closed",
 		},
 		{
-			name:         "type_error",
-			wrappedError: originalErr,
-			kind:         Type,
-			expectedKind: "Type",
+			name: "connection_nil",
+			err:  ErrConnectionNil,
+			want: "connection is nil",
+		},
+		{
+			name: "invalid_message",
+			err:  ErrInvalidMessage,
+			want: "invalid message format",
+		},
+		{
+			name: "timeout",
+			err:  ErrTimeout,
+			want: "operation timed out",
+		},
+		{
+			name: "executor_closed",
+			err:  ErrExecutorClosed,
+			want: "executor is closed",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := NewCodecError(tt.wrappedError, tt.kind)
-
-			// Test Domain()
-			if err.Domain() != CodecDomain {
-				t.Errorf("Domain() = %v, want %v", err.Domain(), CodecDomain)
-			}
-
-			// Test Kind()
-			if err.Kind() != tt.expectedKind {
-				t.Errorf("Kind() = %v, want %v", err.Kind(), tt.expectedKind)
-			}
-
-			// Test Unwrap()
-			if err.Unwrap() != tt.wrappedError {
-				t.Errorf("Unwrap() = %v, want %v", err.Unwrap(), tt.wrappedError)
-			}
-
-			// Test Error()
-			expectedMsg := "Error: Codec => invalid JSON"
-			if err.Error() != expectedMsg {
-				t.Errorf("Error() = %v, want %v", err.Error(), expectedMsg)
+			if tt.err.Error() != tt.want {
+				t.Errorf("got %q, want %q", tt.err.Error(), tt.want)
 			}
 		})
 	}
 }
 
-func TestCodecErrorWithNilWrapped(t *testing.T) {
-	err := NewCodecError(nil, Marshal)
-
-	// Test Error() with nil wrapped error
-	expectedMsg := "Error: Codec => <nil>"
-	if err.Error() != expectedMsg {
-		t.Errorf("Error() = %v, want %v", err.Error(), expectedMsg)
+func TestWrapErrors(t *testing.T) {
+	baseErr := errors.New("base error")
+	
+	wrappedErr := fmt.Errorf("marshal error: %w", baseErr)
+	if !errors.Is(wrappedErr, baseErr) {
+		t.Error("wrapped error should unwrap to base error")
 	}
-
-	// Test Unwrap() returns nil
-	if err.Unwrap() != nil {
-		t.Errorf("Unwrap() = %v, want nil", err.Unwrap())
+	
+	if wrappedErr.Error() != "marshal error: base error" {
+		t.Errorf("got %q, want %q", wrappedErr.Error(), "marshal error: base error")
 	}
 }
 
-func TestCodecErrorKinds(t *testing.T) {
-	kinds := []struct {
-		kind     CodecErrorKind
-		expected string
-	}{
-		{Marshal, "Marshal"},
-		{Unmarshal, "Unmarshal"},
-		{Type, "Type"},
+func TestErrorCreation(t *testing.T) {
+	// Test simple error creation patterns used in the simplified codebase
+	err1 := fmt.Errorf("connection error: %w", ErrConnectionClosed)
+	err2 := fmt.Errorf("read error: %w", ErrTimeout)
+	err3 := fmt.Errorf("write error: operation failed")
+	
+	if !errors.Is(err1, ErrConnectionClosed) {
+		t.Error("err1 should wrap ErrConnectionClosed")
 	}
-
-	for _, k := range kinds {
-		t.Run(string(k.kind), func(t *testing.T) {
-			if string(k.kind) != k.expected {
-				t.Errorf("Kind constant = %v, want %v", string(k.kind), k.expected)
-			}
-		})
+	
+	if !errors.Is(err2, ErrTimeout) {
+		t.Error("err2 should wrap ErrTimeout")
 	}
-}
-
-func TestCodecErrorImplementsQgaError(t *testing.T) {
-	originalErr := fmt.Errorf("test error")
-	err := NewCodecError(originalErr, Unmarshal)
-
-	// Verify it implements QgaError interface
-	var qgaErr QgaError = err
-
-	if qgaErr.Domain() != CodecDomain {
-		t.Errorf("QgaError.Domain() = %v, want %v", qgaErr.Domain(), CodecDomain)
-	}
-
-	if qgaErr.Kind() != "Unmarshal" {
-		t.Errorf("QgaError.Kind() = %v, want %v", qgaErr.Kind(), "Unmarshal")
-	}
-
-	if qgaErr.Unwrap() != originalErr {
-		t.Errorf("QgaError.Unwrap() = %v, want %v", qgaErr.Unwrap(), originalErr)
-	}
-}
-
-func TestCodecErrorChaining(t *testing.T) {
-	originalErr := fmt.Errorf("syntax error")
-	codecErr := NewCodecError(originalErr, Unmarshal)
-
-	// Test error chaining with errors.Is
-	wrappedErr := fmt.Errorf("wrapped: %w", codecErr)
-	if !errors.Is(wrappedErr, originalErr) {
-		t.Error("Error chaining not working correctly with errors.Is")
-	}
-
-	// Test unwrapping works through the chain
-	var targetCodecErr *CodecError
-	if !errors.As(wrappedErr, &targetCodecErr) {
-		t.Error("Error chaining not working correctly with errors.As")
-	}
-
-	if targetCodecErr.Unwrap() != originalErr {
-		t.Error("CodecError unwrapping not working correctly")
+	
+	if err3.Error() != "write error: operation failed" {
+		t.Errorf("got %q, want %q", err3.Error(), "write error: operation failed")
 	}
 }

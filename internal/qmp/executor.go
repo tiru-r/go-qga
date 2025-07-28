@@ -19,27 +19,33 @@ import (
 	"encoding/json"
 	"fmt"
 	"sync"
+	"time"
 
 	"github.com/prevostcorentin/go-qga/internal/common"
-	"github.com/prevostcorentin/go-qga/internal/errors"
+)
+
+const (
+	DefaultWorkerCount  = 5   // Default number of workers in pool
+	DefaultBufferSize   = 100 // Default buffer size for worker pool
+	ChannelBufferSize   = 1   // Buffer size for result channels
 )
 
 type CommandExecutor interface {
-	Run(ctx context.Context, command Command) (any, errors.QgaError)
+	Run(ctx context.Context, command Command) (any, error)
 	RunAsync(ctx context.Context, command Command) <-chan ExecutorResult
 	Close() error
 }
 
 type ExecutorResult struct {
 	Data any
-	Err  errors.QgaError
+	Err  error
 }
 
 type commandExecutor struct {
-	*common.BaseState
-	connection     Connection
-	workerPool     *common.WorkerPool
-	channelPool    *sync.Pool
+	*common.BaseState                // 8 bytes (pointer)
+	connection     Connection        // 16 bytes (interface)  
+	workerPool     *common.WorkerPool // 8 bytes (pointer)
+	channelPool    *sync.Pool        // 8 bytes (pointer)
 }
 
 // Request represents a reusable QMP request structure
@@ -50,30 +56,30 @@ type Request struct {
 
 func NewExecutor(connection Connection) (CommandExecutor, error) {
 	if connection == nil {
-		return nil, fmt.Errorf(errors.ConnectionNilMessage)
+		return nil, fmt.Errorf("connection is nil")
 	}
 	return &commandExecutor{
 		BaseState:  common.NewBaseState(),
 		connection: connection,
-		workerPool: common.NewWorkerPool(5, 100), // 5 workers, buffer size 100
+		workerPool: common.NewWorkerPool(DefaultWorkerCount, DefaultBufferSize),
 		channelPool: &sync.Pool{
 			New: func() any {
-				return make(chan ExecutorResult, 1)
+				return make(chan ExecutorResult, ChannelBufferSize)
 			},
 		},
 	}, nil
 }
 
-func (e *commandExecutor) Run(ctx context.Context, command Command) (any, errors.QgaError) {
+func (e *commandExecutor) Run(ctx context.Context, command Command) (any, error) {
 	e.RLock()
 	defer e.RUnlock()
 
 	if e.IsClosed() {
-		return nil, errors.ErrExecutorClosed
+		return nil, fmt.Errorf("executor is closed")
 	}
 
 	if command == nil {
-		return nil, errors.ErrCommandNil
+		return nil, fmt.Errorf("command is nil")
 	}
 
 	marshalled := Request{
@@ -82,7 +88,7 @@ func (e *commandExecutor) Run(ctx context.Context, command Command) (any, errors
 	}
 	marshalledBytes, marshalErr := json.Marshal(marshalled)
 	if marshalErr != nil {
-		return nil, errors.NewCodecError(marshalErr, errors.Marshal)
+		return nil, fmt.Errorf("marshal error: %w", marshalErr)
 	}
 	// Pre-allocate slice to avoid reallocation when appending line terminator
 	finalBytes := make([]byte, len(marshalledBytes)+1)
@@ -112,7 +118,7 @@ func (e *commandExecutor) RunAsync(ctx context.Context, command Command) <-chan 
 	if e.IsClosed() {
 		resultCh <- ExecutorResult{
 			Data: nil,
-			Err:  errors.ErrExecutorClosed,
+			Err:  fmt.Errorf("executor is closed"),
 		}
 		return resultCh
 	}
@@ -120,7 +126,7 @@ func (e *commandExecutor) RunAsync(ctx context.Context, command Command) <-chan 
 	if command == nil {
 		resultCh <- ExecutorResult{
 			Data: nil,
-			Err:  errors.ErrCommandNil,
+			Err:  fmt.Errorf("command is nil"),
 		}
 		return resultCh
 	}
@@ -134,14 +140,11 @@ func (e *commandExecutor) RunAsync(ctx context.Context, command Command) <-chan 
 		if marshalErr != nil {
 			return ExecutorResult{
 				Data: nil,
-				Err:  errors.NewCodecError(marshalErr, errors.Marshal),
+				Err:  fmt.Errorf("marshal error: %w", marshalErr),
 			}
 		}
-		// Pre-allocate slice to avoid reallocation when appending line terminator
-		finalBytes := make([]byte, len(marshalledBytes)+1)
-		copy(finalBytes, marshalledBytes)
-		finalBytes[len(marshalledBytes)] = common.LineTerminator
-		marshalledBytes = finalBytes
+		// Efficiently append line terminator
+		marshalledBytes = append(marshalledBytes, common.LineTerminator)
 
 		// Use async connection send
 		asyncResult := e.connection.SendAsync(taskCtx, marshalledBytes)
@@ -161,7 +164,7 @@ func (e *commandExecutor) RunAsync(ctx context.Context, command Command) <-chan 
 		case <-taskCtx.Done():
 			return ExecutorResult{
 				Data: nil,
-				Err:  errors.NewCodecError(taskCtx.Err(), errors.Type),
+				Err:  fmt.Errorf("context error: %w", taskCtx.Err()),
 			}
 		}
 	}
@@ -169,40 +172,46 @@ func (e *commandExecutor) RunAsync(ctx context.Context, command Command) <-chan 
 	e.workerPool.Submit(task)
 
 	go func() {
-		select {
-		case result := <-e.workerPool.Results():
-			if execResult, ok := result.(ExecutorResult); ok {
-				resultCh <- execResult
-			} else {
-				resultCh <- ExecutorResult{
-					Data: nil,
-					Err:  errors.NewCodecError(fmt.Errorf("unexpected result type"), errors.Type),
-				}
-			}
-		case <-ctx.Done():
-			resultCh <- ExecutorResult{
-				Data: nil,
-				Err:  errors.NewCodecError(ctx.Err(), errors.Type),
-			}
-		}
-		// Don't close the channel since it's pooled - instead create a wrapper
-	}()
-
-	// Create a wrapper channel that handles pooling
-	wrapperCh := make(chan ExecutorResult, 1)
-	go func() {
 		defer func() {
 			// Return the pooled channel after use
 			e.channelPool.Put(resultCh)
 		}()
 		
-		// Forward the result from pooled channel to wrapper
-		result := <-resultCh
-		wrapperCh <- result
-		close(wrapperCh)
+		select {
+		case result := <-e.workerPool.Results():
+			if execResult, ok := result.(ExecutorResult); ok {
+				select {
+				case resultCh <- execResult:
+				case <-time.After(1 * time.Second):
+					// Channel blocked, exit gracefully
+				case <-ctx.Done():
+					// Context cancelled
+				}
+			} else {
+				select {
+				case resultCh <- ExecutorResult{
+					Data: nil,
+					Err:  fmt.Errorf("unexpected result type"),
+				}:
+				case <-time.After(1 * time.Second):
+					// Channel blocked, exit gracefully
+				case <-ctx.Done():
+					// Context cancelled
+				}
+			}
+		case <-ctx.Done():
+			select {
+			case resultCh <- ExecutorResult{
+				Data: nil,
+				Err:  fmt.Errorf("context cancelled: %w", ctx.Err()),
+			}:
+			case <-time.After(1 * time.Second):
+				// Channel blocked, exit gracefully
+			}
+		}
 	}()
 
-	return wrapperCh
+	return resultCh
 }
 
 func (e *commandExecutor) Close() error {
@@ -217,17 +226,17 @@ func (e *commandExecutor) Close() error {
 	return e.connection.Close()
 }
 
-func (e *commandExecutor) unmarshalCommandResponse(bytes []byte, command Command) (any, errors.QgaError) {
+func (e *commandExecutor) unmarshalCommandResponse(bytes []byte, command Command) (any, error) {
 	typedResponse := command.Response()
 	var root map[string]json.RawMessage
 	if err := json.Unmarshal(bytes, &root); err != nil {
-		return nil, errors.NewCodecError(err, errors.Unmarshal)
+		return nil, fmt.Errorf("unmarshal error: %w", err)
 	}
-	if raw, ok := root[common.JsonFieldReturn]; ok {
+	if raw, ok := root[common.JSONFieldReturn]; ok {
 		if err := json.Unmarshal(raw, &typedResponse); err != nil {
-			return nil, errors.NewCodecError(err, errors.Unmarshal)
+			return nil, fmt.Errorf("unmarshal error: %w", err)
 		}
 		return typedResponse, nil
 	}
-	return nil, errors.ErrMissingReturn
+	return nil, fmt.Errorf("missing return value in response")
 }

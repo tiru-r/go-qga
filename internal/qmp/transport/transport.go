@@ -19,7 +19,6 @@ import (
 	"fmt"
 
 	"github.com/prevostcorentin/go-qga/internal/common"
-	"github.com/prevostcorentin/go-qga/internal/errors"
 )
 
 type TransportType string
@@ -29,7 +28,7 @@ const (
 )
 
 type Transport interface {
-	Connect(ctx context.Context) *errors.TransportError
+	Connect(ctx context.Context) error
 	Close() error
 	Path() string
 	Read(ctx context.Context) ([]byte, error)

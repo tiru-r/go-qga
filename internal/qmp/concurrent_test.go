@@ -19,8 +19,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/prevostcorentin/go-qga/internal/errors"
 )
 
 func TestConcurrentCommandExecution(t *testing.T) {
@@ -99,16 +97,16 @@ type mockConnection struct {
 	closed    bool
 }
 
-func (m *mockConnection) Connect(ctx context.Context, path string) *errors.ConnectionError {
+func (m *mockConnection) Connect(ctx context.Context, path string) error {
 	return nil
 }
 
-func (m *mockConnection) Send(ctx context.Context, bytes []byte) ([]byte, *errors.ConnectionError) {
+func (m *mockConnection) Send(ctx context.Context, bytes []byte) ([]byte, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	
 	if m.closed {
-		return nil, errors.NewConnectionError(&mockError{msg: "connection closed"}, errors.SendErrorKind)
+		return nil, &mockError{msg: "connection closed"}
 	}
 	
 	// Simulate network delay

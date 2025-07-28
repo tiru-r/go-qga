@@ -15,145 +15,115 @@
 package errors
 
 import (
+	"errors"
 	"fmt"
 	"testing"
 )
 
-func TestTransportError(t *testing.T) {
-	originalErr := fmt.Errorf("network unreachable")
-
+func TestTransportErrorPatterns(t *testing.T) {
+	baseErr := errors.New("socket closed")
+	
 	tests := []struct {
-		name         string
-		wrappedError error
-		kind         TransportErrorKind
-		expectedKind string
+		name        string
+		createError func() error
+		wantMessage string
+		wantWrapped error
 	}{
 		{
-			name:         "connect_error",
-			wrappedError: originalErr,
-			kind:         Connect,
-			expectedKind: "Connect",
+			name: "connect_error",
+			createError: func() error {
+				return fmt.Errorf("failed to connect: %w", baseErr)
+			},
+			wantMessage: "failed to connect: socket closed",
+			wantWrapped: baseErr,
 		},
 		{
-			name:         "write_error",
-			wrappedError: originalErr,
-			kind:         Write,
-			expectedKind: "Write",
+			name: "write_error",
+			createError: func() error {
+				return fmt.Errorf("write error: %w", ErrTransportClosed)
+			},
+			wantMessage: "write error: transport is closed",
+			wantWrapped: ErrTransportClosed,
 		},
 		{
-			name:         "read_error",
-			wrappedError: originalErr,
-			kind:         Read,
-			expectedKind: "Read",
+			name: "read_error",
+			createError: func() error {
+				return fmt.Errorf("read error: %w", ErrTimeout)
+			},
+			wantMessage: "read error: operation timed out",
+			wantWrapped: ErrTimeout,
 		},
 		{
-			name:         "close_error",
-			wrappedError: originalErr,
-			kind:         Close,
-			expectedKind: "Close",
+			name: "close_error",
+			createError: func() error {
+				return fmt.Errorf("close error: %w", baseErr)
+			},
+			wantMessage: "close error: socket closed",
+			wantWrapped: baseErr,
 		},
 		{
-			name:         "flush_error",
-			wrappedError: originalErr,
-			kind:         Flush,
-			expectedKind: "Flush",
+			name: "flush_error",
+			createError: func() error {
+				return fmt.Errorf("flush error: %w", baseErr)
+			},
+			wantMessage: "flush error: socket closed",
+			wantWrapped: baseErr,
 		},
 		{
-			name:         "timeout_error",
-			wrappedError: originalErr,
-			kind:         Timeout,
-			expectedKind: "Timeout",
+			name: "timeout_error",
+			createError: func() error {
+				return fmt.Errorf("operation timed out: %w", ErrTimeout)
+			},
+			wantMessage: "operation timed out: operation timed out",
+			wantWrapped: ErrTimeout,
 		},
 		{
-			name:         "not_connected_error",
-			wrappedError: originalErr,
-			kind:         NotConnected,
-			expectedKind: "Not connected",
+			name: "not_connected_error",
+			createError: func() error {
+				return fmt.Errorf("transport not connected: %w", ErrTransportClosed)
+			},
+			wantMessage: "transport not connected: transport is closed",
+			wantWrapped: ErrTransportClosed,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := NewTransportError(tt.wrappedError, tt.kind)
-
-			// Test Domain()
-			if err.Domain() != TransportDomain {
-				t.Errorf("Domain() = %v, want %v", err.Domain(), TransportDomain)
+			err := tt.createError()
+			
+			if err.Error() != tt.wantMessage {
+				t.Errorf("got message %q, want %q", err.Error(), tt.wantMessage)
 			}
-
-			// Test Kind()
-			if err.Kind() != tt.expectedKind {
-				t.Errorf("Kind() = %v, want %v", err.Kind(), tt.expectedKind)
-			}
-
-			// Test Unwrap()
-			if err.Unwrap() != tt.wrappedError {
-				t.Errorf("Unwrap() = %v, want %v", err.Unwrap(), tt.wrappedError)
-			}
-
-			// Test Error()
-			expectedMsg := "Error: Transport => network unreachable"
-			if err.Error() != expectedMsg {
-				t.Errorf("Error() = %v, want %v", err.Error(), expectedMsg)
+			
+			if !errors.Is(err, tt.wantWrapped) {
+				t.Errorf("error should wrap %v", tt.wantWrapped)
 			}
 		})
 	}
 }
 
-func TestTransportErrorWithNilWrapped(t *testing.T) {
-	err := NewTransportError(nil, Connect)
-
-	// Test Error() with nil wrapped error
-	expectedMsg := "Error: Transport => <nil>"
-	if err.Error() != expectedMsg {
-		t.Errorf("Error() = %v, want %v", err.Error(), expectedMsg)
+func TestTransportErrorCreation(t *testing.T) {
+	// Test the simple error creation patterns used in transport layer
+	
+	// Test predefined transport errors
+	if ErrTransportClosed.Error() != "transport is closed" {
+		t.Errorf("got %q, want %q", ErrTransportClosed.Error(), "transport is closed")
 	}
-
-	// Test Unwrap() returns nil
-	if err.Unwrap() != nil {
-		t.Errorf("Unwrap() = %v, want nil", err.Unwrap())
+	
+	// Test error wrapping with context
+	originalErr := errors.New("connection reset")
+	wrappedErr := fmt.Errorf("transport write failed: %w", originalErr)
+	
+	if !errors.Is(wrappedErr, originalErr) {
+		t.Error("wrapped error should be detectable")
 	}
-}
-
-func TestTransportErrorKinds(t *testing.T) {
-	kinds := []struct {
-		kind     TransportErrorKind
-		expected string
-	}{
-		{Connect, "Connect"},
-		{Write, "Write"},
-		{Read, "Read"},
-		{Close, "Close"},
-		{Flush, "Flush"},
-		{Timeout, "Timeout"},
-		{NotConnected, "Not connected"},
-	}
-
-	for _, k := range kinds {
-		t.Run(string(k.kind), func(t *testing.T) {
-			if string(k.kind) != k.expected {
-				t.Errorf("Kind constant = %v, want %v", string(k.kind), k.expected)
-			}
-		})
-	}
-}
-
-func TestTransportErrorImplementsQgaError(t *testing.T) {
-	originalErr := fmt.Errorf("test error")
-	err := NewTransportError(originalErr, Write)
-
-	// Verify it implements QgaError interface
-	var qgaErr QgaError = err
-
-	if qgaErr.Domain() != TransportDomain {
-		t.Errorf("QgaError.Domain() = %v, want %v", qgaErr.Domain(), TransportDomain)
-	}
-
-	if qgaErr.Kind() != "Write" {
-		t.Errorf("QgaError.Kind() = %v, want %v", qgaErr.Kind(), "Write")
-	}
-
-	if qgaErr.Unwrap() != originalErr {
-		t.Errorf("QgaError.Unwrap() = %v, want %v", qgaErr.Unwrap(), originalErr)
+	
+	// Test error chaining
+	err1 := errors.New("network down")
+	err2 := fmt.Errorf("connection failed: %w", err1)
+	err3 := fmt.Errorf("transport error: %w", err2)
+	
+	if !errors.Is(err3, err1) {
+		t.Error("deeply wrapped error should be detectable")
 	}
 }
