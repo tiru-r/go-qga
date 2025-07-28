@@ -27,7 +27,6 @@ var (
 	ErrConnectionNil      = errors.New("connection is nil")
 	ErrInvalidMessage     = errors.New("invalid message format")
 	ErrTimeout           = errors.New("operation timed out")
-	ErrExecutorClosed     = errors.New("executor is closed")
 	ErrCommandNil         = errors.New("command cannot be nil")
 	ErrMissingReturn      = errors.New("missing return field in QGA response")
 )

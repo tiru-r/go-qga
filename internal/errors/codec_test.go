@@ -52,9 +52,14 @@ func TestSimpleErrors(t *testing.T) {
 			want: "operation timed out",
 		},
 		{
-			name: "executor_closed",
-			err:  ErrExecutorClosed,
-			want: "executor is closed",
+			name: "command_nil",
+			err:  ErrCommandNil,
+			want: "command cannot be nil",
+		},
+		{
+			name: "missing_return",
+			err:  ErrMissingReturn,
+			want: "missing return field in QGA response",
 		},
 	}
 

@@ -111,7 +111,8 @@ func TestAllPredefinedErrors(t *testing.T) {
 		ErrConnectionNil,
 		ErrInvalidMessage,
 		ErrTimeout,
-		ErrExecutorClosed,
+		ErrCommandNil,
+		ErrMissingReturn,
 	}
 	
 	for _, err := range predefinedErrors {

@@ -15,51 +15,48 @@
 package qmp
 
 import (
-	"context"
 	"sync"
 	"testing"
-	"time"
+
+	qgatesting "github.com/prevostcorentin/go-qga/internal/testing"
 )
 
-func TestConcurrentCommandExecution(t *testing.T) {
+func TestConcurrentClientConnections(t *testing.T) {
 	if testing.Short() {
 		t.Skip("Skipping concurrent test in short mode")
 	}
 
-	// Create a mock connection for testing
-	mockConn := &mockConnection{
-		responses: make(map[string][]byte),
-		delay:     10 * time.Millisecond,
-	}
-	
-	executor, err := NewExecutor(mockConn)
-	if err != nil {
-		t.Fatalf("Failed to create executor: %v", err)
-	}
-	defer executor.Close()
+	// Create test agent
+	agent, cleanup := qgatesting.SetupAgentWithBehavior(t, qgatesting.DefaultAgentBehavior())
+	defer cleanup()
 
-	ctx := context.Background()
-	numWorkers := 10
-	numRequestsPerWorker := 5
+	socketPath := qgatesting.GetSocketPath(agent)
+	numClients := 10
 
 	var wg sync.WaitGroup
-	results := make(chan ExecutorResult, numWorkers*numRequestsPerWorker)
+	results := make(chan string, numClients)
+	errors := make(chan error, numClients)
 
-	// Launch concurrent workers
-	for i := 0; i < numWorkers; i++ {
+	// Launch concurrent clients
+	for i := 0; i < numClients; i++ {
 		wg.Add(1)
-		go func(workerID int) {
+		go func(clientID int) {
 			defer wg.Done()
-			for j := 0; j < numRequestsPerWorker; j++ {
-				cmd := &mockCommand{
-					execute: "test-command",
-					args:    map[string]any{"worker": workerID, "request": j},
-				}
-				
-				resultCh := executor.RunAsync(ctx, cmd)
-				result := <-resultCh
-				results <- result
+
+			client, err := Connect(socketPath)
+			if err != nil {
+				errors <- err
+				return
 			}
+			defer client.Close()
+
+			hostname, err := client.GetHostname()
+			if err != nil {
+				errors <- err
+				return
+			}
+
+			results <- hostname
 		}(i)
 	}
 
@@ -67,96 +64,46 @@ func TestConcurrentCommandExecution(t *testing.T) {
 	go func() {
 		wg.Wait()
 		close(results)
+		close(errors)
 	}()
 
 	// Collect results
 	var successCount, errorCount int
-	for result := range results {
-		if result.Err != nil {
+	var errorList []error
+	
+	// Collect all results first
+	for results != nil || errors != nil {
+		select {
+		case result, ok := <-results:
+			if !ok {
+				results = nil
+				continue
+			}
+			if result == "fake-vm" {
+				successCount++
+			} else {
+				t.Errorf("Unexpected hostname: %s", result)
+			}
+		case err, ok := <-errors:
+			if !ok {
+				errors = nil
+				continue
+			}
 			errorCount++
-		} else {
-			successCount++
+			errorList = append(errorList, err)
 		}
 	}
 
-	expectedTotal := numWorkers * numRequestsPerWorker
-	actualTotal := successCount + errorCount
-
-	if actualTotal != expectedTotal {
-		t.Errorf("Expected %d total results, got %d", expectedTotal, actualTotal)
+	if errorCount > 0 {
+		t.Errorf("Got %d errors:", errorCount)
+		for _, err := range errorList {
+			t.Logf("  %v", err)
+		}
 	}
 
-	t.Logf("Concurrent test completed: %d successes, %d errors", successCount, errorCount)
-}
-
-// Mock connection for testing
-type mockConnection struct {
-	mu        sync.RWMutex
-	responses map[string][]byte
-	delay     time.Duration
-	closed    bool
-}
-
-func (m *mockConnection) Connect(ctx context.Context, path string) error {
-	return nil
-}
-
-func (m *mockConnection) Send(ctx context.Context, bytes []byte) ([]byte, error) {
-	m.mu.RLock()
-	defer m.mu.RUnlock()
-	
-	if m.closed {
-		return nil, &mockError{msg: "connection closed"}
+	if successCount+errorCount != numClients {
+		t.Errorf("Expected %d total results, got %d", numClients, successCount+errorCount)
 	}
-	
-	// Simulate network delay
-	time.Sleep(m.delay)
-	
-	return []byte(`{"return": "success"}`), nil
-}
 
-func (m *mockConnection) SendAsync(ctx context.Context, bytes []byte) <-chan AsyncResult {
-	ch := make(chan AsyncResult, 1)
-	go func() {
-		data, err := m.Send(ctx, bytes)
-		ch <- AsyncResult{Data: data, Err: err}
-	}()
-	return ch
-}
-
-func (m *mockConnection) Close() error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.closed = true
-	return nil
-}
-
-// Mock command for testing
-type mockCommand struct {
-	execute string
-	args    map[string]any
-}
-
-func (m *mockCommand) Execute() string {
-	return m.execute
-}
-
-func (m *mockCommand) Arguments() any {
-	return m.args
-}
-
-func (m *mockCommand) Response() any {
-	return &mockResponse{}
-}
-
-type mockResponse struct {
-	Status string `json:"status"`
-}
-
-type mockError struct {
-	msg string
-}
-
-func (e *mockError) Error() string {
-	return e.msg
+	t.Logf("Concurrent client test completed: %d successes, %d errors", successCount, errorCount)
 }

@@ -15,7 +15,6 @@
 package qmp_test
 
 import (
-	"context"
 	"net"
 	"runtime"
 	"sync"
@@ -24,7 +23,6 @@ import (
 
 	"github.com/prevostcorentin/go-qga/internal/common"
 	"github.com/prevostcorentin/go-qga/internal/qmp"
-	"github.com/prevostcorentin/go-qga/internal/qmp/transport"
 )
 
 func TestFakeGuestAgentNoGoroutineLeak(t *testing.T) {
@@ -48,29 +46,15 @@ func TestFakeGuestAgentNoGoroutineLeak(t *testing.T) {
 				go func() {
 					defer wg.Done()
 
-					socketPath := agent.Path()
-					transport, err := transport.NewTransport(transport.Unix, socketPath)
+					client, err := qmp.Connect(agent.Path())
 					if err != nil {
-						t.Logf("Creating transport failed (may be normal): %v", err)
+						t.Logf("Connection failed (may be normal): %v", err)
 						return
 					}
-					ctx := context.Background()
-					qgaSocket, openErr := qmp.Open(ctx, socketPath, transport)
-					if openErr != nil {
-						t.Logf("Connection failed (may be normal): %v", openErr)
-						return
-					}
-					defer qgaSocket.Close()
+					defer client.Close()
 
 					// Execute a command to trigger handler goroutine
-					command := hostNameCommand{}
-					executor, err := qmp.NewExecutor(qgaSocket)
-					if err != nil {
-						t.Logf("Creating executor failed (may be normal): %v", err)
-						return
-					}
-					defer executor.Close() // Clean up executor resources
-					_, err = executor.Run(ctx, command)
+					_, err = client.GetHostname()
 					if err != nil {
 						t.Logf("Command failed (may be normal): %v", err)
 					}

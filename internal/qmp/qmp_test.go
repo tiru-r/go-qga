@@ -26,7 +26,6 @@ import (
 	"time"
 
 	"github.com/prevostcorentin/go-qga/internal/qmp"
-	"github.com/prevostcorentin/go-qga/internal/qmp/transport"
 	. "github.com/prevostcorentin/go-qga/internal/testing"
 )
 
@@ -142,53 +141,23 @@ func (agent *fakeGuestAgent) Stop() {
 	}
 }
 
-type hostNameCommand struct{}
-
-func (command hostNameCommand) Execute() string {
-	return "guest-get-host-name"
-}
-
-func (command hostNameCommand) Arguments() any {
-	return nil
-}
-
-func (command hostNameCommand) Response() any {
-	return &hostNameResponse{}
-}
-
-type hostNameResponse struct {
-	Name string
-}
-
 func TestHostnameCommand(t *testing.T) {
-	ctx := context.Background()
 	agent := newFakeGuestAgent(t)
-	socketPath := agent.Path()
-	transport, err := transport.NewTransport(transport.Unix, socketPath)
-	if err != nil {
-		t.Fatalf("creating transport: %v", err)
-	}
 	agent.Start()
-	qgaSocket, openErr := qmp.Open(ctx, socketPath, transport)
-	if openErr != nil {
-		t.Fatalf("while opening socket: %v", openErr)
-	}
-	defer qgaSocket.Close()
+	defer agent.Stop()
 
-	command := hostNameCommand{}
-	executor, err := qmp.NewExecutor(qgaSocket)
+	client, err := qmp.Connect(agent.Path())
 	if err != nil {
-		t.Fatalf("creating executor: %v", err)
+		t.Fatalf("creating client: %v", err)
 	}
-	defer executor.Close()
-	response, err := executor.Run(ctx, command)
+	defer client.Close()
+
+	hostname, err := client.GetHostname()
 	if err != nil {
-		t.Fatalf("while running command: %v", err)
+		t.Fatalf("getting hostname: %v", err)
 	}
-	agent.Stop()
-	typedResponse := response.(*hostNameResponse)
-	if typedResponse.Name != "fake-vm" {
-		t.Errorf(`vm name differs (got "%s", expecting "fake-vm")`, typedResponse.Name)
+	if hostname != "fake-vm" {
+		t.Errorf(`vm name differs (got "%s", expecting "fake-vm")`, hostname)
 	}
 }
 
@@ -212,30 +181,18 @@ func TestHostnameCommandWithStructuredAgent(t *testing.T) {
 
 	agent.WaitReady()
 
-	transport, err := transport.NewTransport(transport.Unix, socketPath)
+	client, err := qmp.Connect(socketPath)
 	if err != nil {
-		t.Fatalf("creating transport: %v", err)
+		t.Fatalf("creating client: %v", err)
 	}
-	qgaSocket, openErr := qmp.Open(ctx, socketPath, transport)
-	if openErr != nil {
-		t.Fatalf("while opening socket: %v", openErr)
-	}
-	defer qgaSocket.Close()
+	defer client.Close()
 
-	command := hostNameCommand{}
-	executor, err := qmp.NewExecutor(qgaSocket)
+	hostname, err := client.GetHostname()
 	if err != nil {
-		t.Fatalf("creating executor: %v", err)
+		t.Fatalf("getting hostname: %v", err)
 	}
-	defer executor.Close()
-	response, err := executor.Run(ctx, command)
-	if err != nil {
-		t.Fatalf("while running command: %v", err)
-	}
-
-	typedResponse := response.(*hostNameResponse)
-	if typedResponse.Name != "fake-vm" {
-		t.Errorf(`vm name differs (got "%s", expecting "fake-vm")`, typedResponse.Name)
+	if hostname != "fake-vm" {
+		t.Errorf(`vm name differs (got "%s", expecting "fake-vm")`, hostname)
 	}
 }
 
@@ -260,36 +217,22 @@ func TestHostnameCommandRobust(t *testing.T) {
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			ctx := context.Background()
 			agent, cleanup := SetupAgentWithBehavior(t, tc.behavior)
 			defer cleanup()
 
-			socketPath := GetSocketPath(agent)
-			transport, err := transport.NewTransport(transport.Unix, socketPath)
+			client, err := qmp.Connect(GetSocketPath(agent))
 			if err != nil {
-				t.Fatalf("creating transport: %v", err)
+				t.Fatalf("creating client: %v", err)
 			}
-			qgaSocket, openErr := qmp.Open(ctx, socketPath, transport)
-			if openErr != nil {
-				t.Fatalf("while opening socket: %v", openErr)
-			}
-			defer qgaSocket.Close()
+			defer client.Close()
 
-			command := hostNameCommand{}
-			executor, err := qmp.NewExecutor(qgaSocket)
+			hostname, err := client.GetHostname()
 			if err != nil {
-				t.Fatalf("creating executor: %v", err)
+				t.Fatalf("getting hostname: %v", err)
 			}
-			defer executor.Close()
-			response, err := executor.Run(ctx, command)
-			if err != nil {
-				t.Fatalf("while running command: %v", err)
-			}
-
-			typedResponse := response.(*hostNameResponse)
-			if typedResponse.Name != tc.expected {
+			if hostname != tc.expected {
 				t.Errorf("vm name differs (got %q, expecting %q)",
-					typedResponse.Name, tc.expected)
+					hostname, tc.expected)
 			}
 		})
 	}
@@ -297,7 +240,6 @@ func TestHostnameCommandRobust(t *testing.T) {
 
 // Test for concurrent access scalability
 func TestHostnameCommandConcurrent(t *testing.T) {
-	ctx := context.Background()
 	agent, cleanup := SetupAgentWithBehavior(t, DefaultAgentBehavior())
 	defer cleanup()
 
@@ -312,33 +254,20 @@ func TestHostnameCommandConcurrent(t *testing.T) {
 	
 	for i := 0; i < numClients; i++ {
 		go func(clientID int) {
-			transport, err := transport.NewTransport(transport.Unix, socketPath)
+			client, err := qmp.Connect(socketPath)
 			if err != nil {
-				errors <- fmt.Errorf("client %d creating transport: %v", clientID, err)
+				errors <- fmt.Errorf("client %d connect error: %v", clientID, err)
 				return
 			}
-			qgaSocket, openErr := qmp.Open(ctx, socketPath, transport)
-			if openErr != nil {
-				errors <- fmt.Errorf("client %d open error: %v", clientID, openErr)
-				return
-			}
-			defer qgaSocket.Close()
+			defer client.Close()
 
-			command := hostNameCommand{}
-			executor, err := qmp.NewExecutor(qgaSocket)
+			hostname, err := client.GetHostname()
 			if err != nil {
-				errors <- fmt.Errorf("client %d creating executor: %v", clientID, err)
-				return
-			}
-			defer executor.Close()
-			response, err := executor.Run(ctx, command)
-			if err != nil {
-				errors <- fmt.Errorf("client %d run error: %v", clientID, err)
+				errors <- fmt.Errorf("client %d hostname error: %v", clientID, err)
 				return
 			}
 
-			typedResponse := response.(*hostNameResponse)
-			results <- typedResponse.Name
+			results <- hostname
 		}(i)
 	}
 
