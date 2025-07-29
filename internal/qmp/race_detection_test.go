@@ -135,7 +135,7 @@ func TestMemoryLeakPrevention(t *testing.T) {
 			}
 
 			// Perform some operations to create pending requests
-			var channels []<-chan qmp.AsyncResult
+			var channels []<-chan qmp.TransportResult
 			for j := 0; j < 5; j++ {
 				resultCh := conn.SendAsync(ctx, []byte(common.QmpHostnameRequest))
 				channels = append(channels, resultCh)

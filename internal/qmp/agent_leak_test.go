@@ -119,8 +119,7 @@ func TestFakeGuestAgentProperShutdown(t *testing.T) {
 			conn.Write([]byte(common.QmpHostnameRequest))
 
 			// Read response
-			buffer := common.GlobalBufferPool.GetStandard()
-			defer common.GlobalBufferPool.PutStandard(buffer)
+			buffer := make([]byte, 1024)
 			conn.Read(buffer)
 
 			// Brief delay to keep handler busy

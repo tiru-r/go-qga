@@ -20,8 +20,6 @@ import (
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/prevostcorentin/go-qga/internal/common"
 )
 
 func BenchmarkSocketAgentThroughput(b *testing.B) {
@@ -65,8 +63,7 @@ func BenchmarkSocketAgentThroughput(b *testing.B) {
 			}
 
 			conn.Write([]byte("request"))
-			buffer := common.GlobalBufferPool.GetStandard()
-			defer common.GlobalBufferPool.PutStandard(buffer)
+			buffer := make([]byte, 1024)
 			conn.Read(buffer)
 			conn.Close()
 		}
@@ -126,8 +123,7 @@ func BenchmarkConcurrentAgents(b *testing.B) {
 			}
 
 			conn.Write([]byte(`{"execute":"guest-get-host-name"}`))
-			buffer := common.GlobalBufferPool.GetStandard()
-			defer common.GlobalBufferPool.PutStandard(buffer)
+			buffer := make([]byte, 1024)
 			conn.Read(buffer)
 			conn.Close()
 		}

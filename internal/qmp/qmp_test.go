@@ -88,7 +88,7 @@ func handleConnection(t *testing.T, connection net.Conn) {
 	writer := bufio.NewWriter(connection)
 	reader := bufio.NewReader(connection)
 
-	banner := QmpBannerResponse{}
+	banner := QMPBannerResponse{}
 	bytes, _ := json.Marshal(banner)
 	fmt.Fprintln(writer, string(bytes))
 	writer.Flush()
@@ -98,7 +98,7 @@ func handleConnection(t *testing.T, connection net.Conn) {
 	if err != nil {
 		return
 	}
-	var command QmpCommand
+	var command QMPCommand
 	if err := json.Unmarshal(line, &command); err != nil {
 		t.Fatalf("unmarshalling command: %v", err)
 	}
@@ -108,7 +108,7 @@ func handleConnection(t *testing.T, connection net.Conn) {
 		qmpResponse.Return.Name = "fake-vm"
 		response = qmpResponse
 	} else {
-		response = QmpError{}
+		response = QMPError{}
 	}
 	bytes, err = json.Marshal(response)
 	if err != nil {

@@ -94,31 +94,31 @@ func NewSocketAgent(config SocketAgentConfig) *SimpleTestAgent {
 
 
 // QMP message types for reusability
-type QemuVersion struct {
+type QEMUVersion struct {
 	Major string `json:"major"`
 	Minor string `json:"minor"`
 	Micro string `json:"micro"`
 }
 
-type QmpVersion struct {
-	Qemu    QemuVersion `json:"qemu"`
+type QMPVersion struct {
+	QEMU    QEMUVersion `json:"qemu"`
 	Package string      `json:"package"`
 }
 
-type QmpInfo struct {
-	Version      QmpVersion `json:"version"`
+type QMPInfo struct {
+	Version      QMPVersion `json:"version"`
 	Capabilities []any      `json:"capabilities"`
 }
 
-type QmpBannerResponse struct {
-	Qmp QmpInfo `json:"QMP"`
+type QMPBannerResponse struct {
+	QMP QMPInfo `json:"QMP"`
 }
 
-type QmpCommand struct {
+type QMPCommand struct {
 	Execute string `json:"execute"`
 }
 
-type QmpError struct {
+type QMPError struct {
 	Error struct {
 		Class       string `json:"class"`
 		Description string `json:"desc"`
@@ -129,7 +129,7 @@ type QmpError struct {
 type AgentBehavior struct {
 	Commands       map[string]func() any
 	Timeout        time.Duration
-	Banner         QmpBannerResponse
+	Banner         QMPBannerResponse
 	ErrorOnUnknown bool
 }
 
@@ -147,7 +147,7 @@ func (b *AgentBehavior) SetTimeout(timeout time.Duration) {
 }
 
 // SetBanner configures the QMP banner for the behavior
-func (b *AgentBehavior) SetBanner(banner QmpBannerResponse) {
+func (b *AgentBehavior) SetBanner(banner QMPBannerResponse) {
 	b.Banner = banner
 }
 
@@ -176,7 +176,7 @@ func DefaultAgentBehavior() *AgentBehavior {
 			},
 		},
 		Timeout:        5 * time.Second,
-		Banner:         QmpBannerResponse{},
+		Banner:         QMPBannerResponse{},
 		ErrorOnUnknown: true,
 	}
 }
@@ -196,7 +196,7 @@ func ErrorAgentBehavior() *AgentBehavior {
 	return &AgentBehavior{
 		Commands: map[string]func() any{
 			common.CommandGuestGetHostName: func() any {
-				return &QmpError{
+				return &QMPError{
 					Error: struct {
 						Class       string `json:"class"`
 						Description string `json:"desc"`
@@ -208,7 +208,7 @@ func ErrorAgentBehavior() *AgentBehavior {
 			},
 		},
 		Timeout:        5 * time.Second,
-		Banner:         QmpBannerResponse{},
+		Banner:         QMPBannerResponse{},
 		ErrorOnUnknown: false,
 	}
 }
@@ -229,7 +229,7 @@ func CreateQmpHandler(t TestingT, behavior *AgentBehavior) func(net.Conn) {
 		for {
 			// Set read timeout for each command
 			if behavior.Timeout > 0 {
-				common.GlobalTimeManager.SetReadDeadline(conn, behavior.Timeout)
+				conn.SetReadDeadline(time.Now().Add(behavior.Timeout))
 			}
 
 			// Read command
@@ -239,7 +239,7 @@ func CreateQmpHandler(t TestingT, behavior *AgentBehavior) func(net.Conn) {
 				return
 			}
 
-			command := &QmpCommand{}
+			command := &QMPCommand{}
 			if err := json.Unmarshal(line, command); err != nil {
 				if behavior.ErrorOnUnknown {
 					t.Logf("Error unmarshalling command: %v", err)
@@ -252,7 +252,7 @@ func CreateQmpHandler(t TestingT, behavior *AgentBehavior) func(net.Conn) {
 			if handler, exists := behavior.Commands[command.Execute]; exists {
 				response = handler()
 			} else if behavior.ErrorOnUnknown {
-				response = &QmpError{
+				response = &QMPError{
 					Error: struct {
 						Class       string `json:"class"`
 						Description string `json:"desc"`

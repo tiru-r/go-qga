@@ -15,6 +15,7 @@
 package qmp
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"net"
@@ -24,45 +25,53 @@ import (
 	"github.com/prevostcorentin/go-qga/internal/common"
 )
 
+// Client provides a simple, leak-free QMP client
+type Client struct {
+	mu     sync.Mutex
+	conn   net.Conn
+	buffer []byte
+	closed bool
+}
+
 // Connect creates a new QMP connection (deprecated: use NewClient)
 func Connect(socketPath string) (*Client, error) {
 	return NewClient(socketPath)
 }
 
-// Client provides a QMP client
-type Client struct {
-	mu     sync.RWMutex // Protect concurrent access
-	conn   net.Conn
-	path   string
-	buffer []byte
-}
-
-// NewClient creates a new QMP connection
+// NewClient creates a new QMP client with proper resource management
 func NewClient(socketPath string) (*Client, error) {
 	conn, err := net.DialTimeout("unix", socketPath, 5*time.Second)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to %s: %v", socketPath, err)
+		return nil, fmt.Errorf("failed to connect to %s: %w", socketPath, err)
 	}
 
 	client := &Client{
 		conn:   conn,
-		path:   socketPath,
-		buffer: common.GlobalBufferPool.GetLarge(),
+		buffer: make([]byte, 4096), // Direct allocation, no global pools
+		closed: false,
 	}
 
 	// Consume the QMP banner
-	client.consumeBanner()
+	if err := client.consumeBanner(); err != nil {
+		client.Close()
+		return nil, fmt.Errorf("failed to consume banner: %w", err)
+	}
 
 	return client, nil
 }
 
-// Execute runs a QMP command
-func (c *Client) Execute(command string, args ...any) (map[string]any, error) {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+// Execute runs a QMP command synchronously
+func (c *Client) Execute(command string, args any) (map[string]any, error) {
+	return c.ExecuteWithContext(context.Background(), command, args)
+}
 
-	if c.conn == nil {
-		return nil, fmt.Errorf("client connection is closed")
+// ExecuteWithContext runs a QMP command with context support
+func (c *Client) ExecuteWithContext(ctx context.Context, command string, args any) (map[string]any, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if c.closed {
+		return nil, fmt.Errorf("client is closed")
 	}
 
 	// Build request
@@ -70,32 +79,55 @@ func (c *Client) Execute(command string, args ...any) (map[string]any, error) {
 		common.JSONFieldExecute: command,
 	}
 
-	// Add arguments if provided
-	if len(args) > 0 && args[0] != nil {
-		request["arguments"] = args[0]
+	if args != nil {
+		request["arguments"] = args
 	}
 
-	// Send request
+	// Marshal request
 	jsonData, err := json.Marshal(request)
 	if err != nil {
-		return nil, fmt.Errorf("failed to encode request: %v", err)
+		return nil, fmt.Errorf("failed to encode request: %w", err)
 	}
 
-	// Pre-allocate slice to avoid reallocation when appending line terminator
-	data := make([]byte, len(jsonData)+1)
-	copy(data, jsonData)
-	data[len(jsonData)] = '\n'
+	// Send request with newline
+	data := append(jsonData, '\n')
+	
+	// Set write deadline
+	if deadline, ok := ctx.Deadline(); ok {
+		c.conn.SetWriteDeadline(deadline)
+	} else {
+		c.conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
+	}
+	
 	if _, err := c.conn.Write(data); err != nil {
-		return nil, fmt.Errorf("failed to send command: %v", err)
+		return nil, fmt.Errorf("failed to send command: %w", err)
 	}
 
 	// Read response
-	return c.readResponse()
+	return c.readResponse(ctx)
+}
+
+// ExecuteAsync runs a QMP command asynchronously
+func (c *Client) ExecuteAsync(ctx context.Context, command string, args any) <-chan AsyncResult {
+	resultCh := make(chan AsyncResult, 1)
+	
+	go func() {
+		defer close(resultCh)
+		
+		result, err := c.ExecuteWithContext(ctx, command, args)
+		select {
+		case resultCh <- AsyncResult{Data: result, Err: err}:
+		case <-ctx.Done():
+			// Context cancelled, don't send result
+		}
+	}()
+	
+	return resultCh
 }
 
 // GetHostname gets the VM hostname
 func (c *Client) GetHostname() (string, error) {
-	result, err := c.Execute(common.CommandGuestGetHostName)
+	result, err := c.Execute(common.CommandGuestGetHostName, nil)
 	if err != nil {
 		return "", err
 	}
@@ -109,60 +141,62 @@ func (c *Client) GetHostname() (string, error) {
 	return "", fmt.Errorf("hostname not found in response")
 }
 
-// Close closes the connection gracefully
-func (c *Client) Close() {
+// Close closes the connection and cleans up resources
+func (c *Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
+	if c.closed {
+		return nil
+	}
+
+	c.closed = true
+	
 	if c.conn != nil {
-		c.conn.Close()
-		c.conn = nil // Prevent double close
+		return c.conn.Close()
 	}
-	// Return buffer to pool
-	if c.buffer != nil {
-		common.GlobalBufferPool.PutLarge(c.buffer)
-		c.buffer = nil // Prevent double return
-	}
+	
+	return nil
 }
 
 // consumeBanner reads and discards the QMP banner
-func (c *Client) consumeBanner() {
-	c.mu.RLock()
-	defer c.mu.RUnlock()
+func (c *Client) consumeBanner() error {
+	c.conn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	defer c.conn.SetReadDeadline(time.Time{})
 
-	if c.conn == nil || c.buffer == nil {
-		return // Connection already closed
+	n, err := c.conn.Read(c.buffer)
+	if err != nil {
+		return fmt.Errorf("failed to read banner: %w", err)
 	}
-
-	// Set a short timeout for banner reading
-	common.GlobalTimeManager.SetReadDeadline(c.conn, 1 * time.Second)
-	defer common.GlobalTimeManager.ClearDeadlines(c.conn) // Clear timeout
-
-	// Try to read banner, ignore errors
-	c.conn.Read(c.buffer)
+	
+	// Banner should be valid JSON - basic validation
+	var banner map[string]any
+	if err := json.Unmarshal(c.buffer[:n], &banner); err != nil {
+		return fmt.Errorf("invalid QMP banner: %w", err)
+	}
+	
+	return nil
 }
 
 // readResponse reads and parses a QMP response
-func (c *Client) readResponse() (map[string]any, error) {
-	// Note: This method is called with read lock already held by Execute
-	if c.conn == nil || c.buffer == nil {
-		return nil, fmt.Errorf("client connection is closed")
+func (c *Client) readResponse(ctx context.Context) (map[string]any, error) {
+	// Set read deadline
+	if deadline, ok := ctx.Deadline(); ok {
+		c.conn.SetReadDeadline(deadline)
+	} else {
+		c.conn.SetReadDeadline(time.Now().Add(10 * time.Second))
 	}
+	defer c.conn.SetReadDeadline(time.Time{})
 
-	// Set reasonable timeout
-	common.GlobalTimeManager.SetReadDeadline(c.conn, 10 * time.Second)
-	defer common.GlobalTimeManager.ClearDeadlines(c.conn) // Clear timeout
-
-	// Read response
 	n, err := c.conn.Read(c.buffer)
 	if err != nil {
-		return nil, fmt.Errorf("failed to read response: %v", err)
+		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
 
-	// Parse JSON
+	// Parse JSON response
 	var response map[string]any
 	if err := json.Unmarshal(c.buffer[:n], &response); err != nil {
-		return nil, fmt.Errorf("failed to parse response: %v", err)
+		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	// Check for QMP errors
@@ -176,4 +210,10 @@ func (c *Client) readResponse() (map[string]any, error) {
 	}
 
 	return response, nil
+}
+
+// AsyncResult represents the result of an async operation
+type AsyncResult struct {
+	Data map[string]any
+	Err  error
 }

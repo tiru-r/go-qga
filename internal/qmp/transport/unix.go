@@ -21,11 +21,12 @@ import (
 	"net"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/prevostcorentin/go-qga/internal/common"
 )
 
-type unixTransport struct {
+type UnixTransport struct {
 	*common.BaseState
 	path       string
 	connection net.Conn
@@ -47,7 +48,7 @@ type writeRequest struct {
 	resp chan error
 }
 
-func (t *unixTransport) Connect(ctx context.Context) error {
+func (t *UnixTransport) Connect(ctx context.Context) error {
 	t.Lock()
 	defer t.Unlock()
 
@@ -86,7 +87,7 @@ func (t *unixTransport) Connect(ctx context.Context) error {
 	return nil
 }
 
-func (t *unixTransport) Write(ctx context.Context, bytes []byte) error {
+func (t *UnixTransport) Write(ctx context.Context, bytes []byte) error {
 	// Check atomic closed flag first to avoid lock contention
 	if atomic.LoadInt32(&t.closed) != 0 {
 		return fmt.Errorf("transport is closed")
@@ -121,7 +122,7 @@ func (t *unixTransport) Write(ctx context.Context, bytes []byte) error {
 	}
 }
 
-func (t *unixTransport) Read(ctx context.Context) ([]byte, error) {
+func (t *UnixTransport) Read(ctx context.Context) ([]byte, error) {
 	// Check atomic closed flag first to avoid lock contention
 	if atomic.LoadInt32(&t.closed) != 0 {
 		return nil, fmt.Errorf("transport is closed")
@@ -145,11 +146,11 @@ func (t *unixTransport) Read(ctx context.Context) ([]byte, error) {
 	}
 }
 
-func (u *unixTransport) Path() string {
+func (u *UnixTransport) Path() string {
 	return u.path
 }
 
-func (u *unixTransport) Close() error {
+func (u *UnixTransport) Close() error {
 	// Use atomic compare-and-swap to ensure only one close operation
 	if !atomic.CompareAndSwapInt32(&u.closed, 0, 1) {
 		return nil // Already closed by another goroutine
@@ -196,7 +197,7 @@ func (u *unixTransport) Close() error {
 	return firstErr
 }
 
-func (t *unixTransport) readLoop() {
+func (t *UnixTransport) readLoop() {
 	for {
 		select {
 		case <-t.done:
@@ -215,7 +216,7 @@ func (t *unixTransport) readLoop() {
 			}
 			
 			// Set read timeout for blocking operation (connection access is safe under lock)
-			if err := common.GlobalTimeManager.SetReadDeadlineDefault(t.connection); err != nil {
+			if err := t.connection.SetReadDeadline(time.Now().Add(10 * time.Second)); err != nil {
 				t.RUnlock()
 				select {
 				case t.readCh <- readResult{nil, fmt.Errorf("read error: %w", err)}:
@@ -247,7 +248,7 @@ func (t *unixTransport) readLoop() {
 	}
 }
 
-func (t *unixTransport) writeLoop() {
+func (t *UnixTransport) writeLoop() {
 	for {
 		select {
 		case <-t.done:
@@ -268,7 +269,7 @@ func (t *unixTransport) writeLoop() {
 			}
 			
 			// Set write timeout (connection access is safe under lock)
-			if err := common.GlobalTimeManager.SetWriteDeadlineDefault(t.connection); err != nil {
+			if err := t.connection.SetWriteDeadline(time.Now().Add(10 * time.Second)); err != nil {
 				t.RUnlock()
 				req.resp <- fmt.Errorf("write error: %w", err)
 				continue

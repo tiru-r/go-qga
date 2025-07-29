@@ -38,7 +38,7 @@ type Transport interface {
 func NewTransport(transportType TransportType, path string) (Transport, error) {
 	switch transportType {
 	case Unix:
-		return &unixTransport{
+		return &UnixTransport{
 			BaseState: common.NewBaseState(),
 			path:      path,
 		}, nil

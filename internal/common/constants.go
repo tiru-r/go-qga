@@ -16,7 +16,6 @@ package common
 
 import (
 	"encoding/json"
-	"time"
 )
 
 // Protocol constants
@@ -57,25 +56,4 @@ func MarshalToBytesIgnoreError(v any) []byte {
 	return bytes
 }
 
-// Buffer size constants
-const (
-	SmallBufferSize    = 1024  // For test environments
-	StandardBufferSize = 4096  // Standard operations
-	LargeBufferSize    = 8192  // High performance operations
-	XLargeBufferSize   = 16384 // Very high throughput
-)
-
-// Timeout constants
-const (
-	DefaultTimeout = 30 * time.Second
-	FastTimeout    = 5 * time.Second
-	SlowTimeout    = 60 * time.Second
-)
-
-// Connection limits
-const (
-	DefaultMaxConnections = 1000
-	MaxAllowedConnections = 1000000
-	TestMaxConnections    = 100
-	HighPerfMaxConnections = 10000
-)
+// Simplified constants - removed over-engineered buffer size options
